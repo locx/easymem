@@ -162,3 +162,9 @@ def refresh_branch():
 def get_current_branch():
     """Return cached current branch name."""
     return _current_branch
+
+
+# Hybrid retrieval — vector layer
+EMBED_MODEL = "minishlab/potion-retrieval-32M"
+EMBED_DIM = 256
+RRF_K = 60

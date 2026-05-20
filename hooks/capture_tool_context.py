@@ -3,13 +3,154 @@
 
 Usage: python3 capture_tool_context.py <input_json> <graph_path>
 """
+import argparse
 import hashlib
 import json
 import os
 import sys
 import time
+import time as _time_mod
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 
 _WARN_SCAN_LINE_BUDGET = 5_000
+
+
+def _sha8(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
+
+
+def _iso_now() -> str:
+    return _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime())
+
+
+def _current_branch(cwd: str = "") -> str:
+    head_path = os.path.join(cwd or os.getcwd(), ".git", "HEAD")
+    try:
+        with open(head_path) as f:
+            content = f.read().strip()
+        if content.startswith("ref: refs/heads/"):
+            return content[16:]
+    except OSError:
+        pass
+    return ""
+
+
+def _append_episode(graph_path: str, name: str,
+                    observations: list) -> None:
+    """Append an episode entity to graph.jsonl under flock."""
+    entry = {
+        "type": "entity",
+        "name": name,
+        "entityType": "episode",
+        "observations": observations,
+        "_branch": _current_branch(),
+        "_created": _iso_now(),
+        "_updated": _iso_now(),
+    }
+    line = json.dumps(entry, separators=(",", ":")) + "\n"
+    with open(graph_path, "a", encoding="utf-8") as f:
+        if _fcntl is not None:
+            try:
+                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX)
+            except OSError:
+                pass
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
+def mint_error(input_path: str, graph_path: str) -> None:
+    try:
+        with open(input_path) as f:
+            data = json.load(f)
+    except Exception:
+        return
+    err = (data.get("tool_response", {}).get("error")
+           or data.get("tool_response", {}).get("stderr", "")).strip()
+    if not err:
+        return
+    tool = data.get("tool_name", "")
+    target = (data.get("tool_input", {}).get("file_path")
+              or data.get("tool_input", {}).get("command", ""))[:200]
+    stable_key = f"{target}|{err[:200]}"
+    name = f"episode:err:{_sha8(stable_key)}"
+    obs = [
+        f"[ERROR] tool={tool}",
+        f"target={target}",
+        f"msg={err[:300]}",
+    ]
+    _append_episode(graph_path, name, obs)
+
+
+CHURN_THRESHOLD = 3
+CHURN_WINDOW_S = 300
+
+
+def mint_churn(input_path: str, graph_path: str) -> None:
+    try:
+        with open(input_path) as f:
+            data = json.load(f)
+    except Exception:
+        return
+    tool = data.get("tool_name", "")
+    if tool not in ("Edit", "Write"):
+        return
+    fp = data.get("tool_input", {}).get("file_path", "")
+    if not fp:
+        return
+    sid = os.environ.get("CLAUDE_SESSION_ID", "unknown")
+    safe_sid = "".join(
+        c if c.isalnum() or c in "_-" else "_" for c in sid
+    )[:64]
+    path_hash = _sha8(fp)
+    marker = f"/tmp/.claude-mem-churn-{safe_sid}-{path_hash}"
+    sentinel = marker + ".minted"
+    try:
+        with open(marker, "ab") as f:
+            f.write(b".")
+    except OSError:
+        return
+    try:
+        size = os.path.getsize(marker)
+        mtime = os.path.getmtime(marker)
+    except OSError:
+        return
+    if (size < CHURN_THRESHOLD
+            or (_time_mod.time() - mtime) >= CHURN_WINDOW_S):
+        return
+    try:
+        fd = os.open(
+            sentinel, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.close(fd)
+    except FileExistsError:
+        return
+    name = f"episode:churn:{_sha8(fp + sid)}"
+    obs = [
+        f"[CHURN] {CHURN_THRESHOLD}+ edits in "
+        f"<{CHURN_WINDOW_S // 60}min",
+        f"file={fp}",
+    ]
+    _append_episode(graph_path, name, obs)
+
+
+def mint_commit(graph_path: str, sha: str, msg: str) -> None:
+    sha = (sha or "").strip()
+    if not sha:
+        return
+    name = f"episode:commit:{sha[:8]}"
+    obs = [
+        f"[COMMIT] sha={sha}",
+        f"msg={(msg or '')[:200]}",
+    ]
+    _append_episode(graph_path, name, obs)
 
 
 def _check_file_warnings(graph_path, filename, session_id):
@@ -165,4 +306,21 @@ def main():
 
 
 if __name__ == '__main__':
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--mint-error", nargs=2, metavar=("INPUT", "GRAPH"))
+    p.add_argument("--mint-churn", nargs=2, metavar=("INPUT", "GRAPH"))
+    p.add_argument("--mint-commit", nargs=3,
+                   metavar=("GRAPH", "SHA", "MSG"))
+    p.add_argument("rest", nargs="*")
+    args, _unknown = p.parse_known_args()
+
+    if args.mint_error:
+        mint_error(*args.mint_error)
+        sys.exit(0)
+    if args.mint_churn:
+        mint_churn(*args.mint_churn)
+        sys.exit(0)
+    if args.mint_commit:
+        mint_commit(*args.mint_commit)
+        sys.exit(0)
     main()

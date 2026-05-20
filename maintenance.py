@@ -65,6 +65,11 @@ _DEFAULTS = {
 
 _cfg = dict(_DEFAULTS)
 
+# Episode lifecycle — unrecalled episodes prune at 14 days
+# (vs default 90), recalled (>= EPISODE_SURVIVAL_RECALL) survive via scorer
+EPISODE_DECAY_DAYS = 14
+EPISODE_SURVIVAL_RECALL = 2
+
 
 def _valid(cfg, key, types, lo, hi):
     """Return cfg[key] if valid type + in bounds, else None."""
@@ -432,7 +437,7 @@ def _finalize_maintenance(memory_dir, entities, recall_counts, pruned, merged):
     rebuild_index(memory_dir)
 
 
-def run(project_dir):
+def run(project_dir, force=False):
     """Main: stamp → prune → consolidate → rewrite → index."""
     _cfg.update(_DEFAULTS)
     memory_dir = os.path.join(project_dir, ".memory")
@@ -443,10 +448,29 @@ def run(project_dir):
     if not os.path.exists(graph_path):
         return
 
-    if os.path.exists(marker):
+    if not force and os.path.exists(marker):
         age_h = (time.time() - os.path.getmtime(marker)) / 3600
         if age_h < _cfg["THROTTLE_HOURS"]:
             return
+
+    # Prevent concurrent maintenance runs at the process level
+    # (separate from per-write .graph.lock used by the server).
+    maint_lock_path = os.path.join(memory_dir, ".maintenance-lock")
+    maint_lock_fd = None
+    if fcntl is not None:
+        try:
+            maint_lock_fd = open(maint_lock_path, "a")
+            fcntl.flock(
+                maint_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except (IOError, OSError):
+            if maint_lock_fd is not None:
+                maint_lock_fd.close()
+            print(
+                "[maintenance] another run in progress, exiting",
+                file=sys.stderr,
+            )
+            sys.exit(0)
 
     # P3: acquire lock BEFORE partition to eliminate TOCTOU
     lock_fd = _acquire_lock(memory_dir)
@@ -455,35 +479,57 @@ def run(project_dir):
         return
 
     try:
-        # Merge pending inside lock
-        mem_path = Path(memory_dir)
-        gp = mem_path / "graph.jsonl"
-        pending = mem_path / "graph.jsonl.pending"
-        merge_pending(mem_path, gp, pending, lock=None, invalidate_cb=None)
-
-        if not _backup_graph(graph_path):
-            return
-
         try:
-            entities, relations, others = partition_graph(graph_path)
-        except (OSError, MemoryError) as exc:
-            print(f"Maintenance: failed to load graph: {exc}")
-            return
-        if not entities and not relations and not others:
+            # Merge pending inside lock
+            mem_path = Path(memory_dir)
+            gp = mem_path / "graph.jsonl"
+            pending = mem_path / "graph.jsonl.pending"
+            merge_pending(mem_path, gp, pending, lock=None, invalidate_cb=None)
+
+            if not _backup_graph(graph_path):
+                return
+
+            try:
+                entities, relations, others = partition_graph(graph_path)
+            except (OSError, MemoryError) as exc:
+                print(f"Maintenance: failed to load graph: {exc}")
+                return
+            if not entities and not relations and not others:
+                Path(marker).touch()
+                return
+
+            entities, relations, pruned, merged, recall_counts = \
+                _compute_maintenance(entities, relations, project_dir, memory_dir)
+
+            write_jsonl(graph_path, chain(entities, relations, others))
             Path(marker).touch()
-            return
+        finally:
+            _release_lock(lock_fd)
 
-        entities, relations, pruned, merged, recall_counts = \
-            _compute_maintenance(entities, relations, project_dir, memory_dir)
+        _finalize_maintenance(
+            memory_dir, entities, recall_counts, pruned, merged
+        )
 
-        write_jsonl(graph_path, chain(entities, relations, others))
-        Path(marker).touch()
+        # Dense vector index rebuild after TF-IDF. Clean-fails when
+        # the optional vector layer (numpy/onnx) is not installed.
+        try:
+            from semantic_server.vector import rebuild_if_stale
+            from semantic_server.graph import load_graph_entities
+            graph_mtime = (
+                os.stat(graph_path).st_mtime
+                if os.path.exists(graph_path) else 0.0
+            )
+            ents_for_vec = load_graph_entities(memory_dir)
+            rebuild_if_stale(memory_dir, ents_for_vec, graph_mtime)
+        except ImportError:
+            pass
     finally:
-        _release_lock(lock_fd)
-
-    _finalize_maintenance(
-        memory_dir, entities, recall_counts, pruned, merged
-    )
+        if maint_lock_fd is not None:
+            try:
+                fcntl.flock(maint_lock_fd, fcntl.LOCK_UN)
+            except (IOError, OSError):
+                pass
+            maint_lock_fd.close()
 
 
 def rebuild_index(memory_dir):
@@ -521,15 +567,20 @@ def rebuild_index(memory_dir):
 
 
 if __name__ == "__main__":
-    _dry_run = "--dry-run" in sys.argv
-    _args = [a for a in sys.argv[1:] if a != "--dry-run"]
-    proj = (
-        _args[0]
-        if _args
-        else os.environ.get(
-            "CLAUDE_PROJECT_DIR", os.getcwd()
-        )
+    import argparse
+    _parser = argparse.ArgumentParser(description=__doc__)
+    _parser.add_argument(
+        "project_dir", nargs="?",
+        default=os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()),
     )
+    _parser.add_argument("--dry-run", action="store_true")
+    _parser.add_argument(
+        "--force", action="store_true",
+        help="Bypass 24h throttle.",
+    )
+    _ns = _parser.parse_args()
+    proj = _ns.project_dir
+    _dry_run = _ns.dry_run
     mem_dir = os.path.join(proj, ".memory")
     if not os.path.isdir(mem_dir):
         print(
@@ -556,4 +607,4 @@ if __name__ == "__main__":
                 f"entities, {len(rels)} relations"
             )
     else:
-        run(proj)
+        run(proj, force=_ns.force)

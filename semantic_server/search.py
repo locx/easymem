@@ -192,8 +192,32 @@ def _format_results(results, compact, metadata, memory_dir):
             )
 
 
+def _tfidf_search_impl(query, memory_dir, top_k, current_branch):
+    """TF-IDF cosine search. Same return shape as legacy search()."""
+    idx = load_index(memory_dir)
+    if idx is None:
+        return {"error": "No TF-IDF index found. Ensure SessionStart ran.",
+                "results": [], "total_indexed": 0}
+    vectors = idx.get("vectors", {})
+    idf = idx.get("idf", {})
+    alias_map = _get_alias_map(memory_dir)
+    query_vec, mag_q = _build_query_vector(query, idf, alias_map or None)
+    if not query_vec or mag_q == 0:
+        return {"results": [], "total_indexed": len(vectors)}
+    candidates = _get_candidates(
+        query_vec.keys(), idx.get("postings", {}), vectors,
+    )
+    results = _score_candidates(
+        query_vec, mag_q, candidates, vectors,
+        idx.get("magnitudes", {}), idx.get("metadata", {}),
+        current_branch, top_k,
+    )
+    return {"results": results, "total_indexed": len(vectors),
+            "current_branch": current_branch}
+
+
 def search(query, memory_dir, top_k=5, branch=None, compact=False):
-    """Search memory graph using TF-IDF cosine similarity."""
+    """Hybrid search: TF-IDF + vector fused via RRF, phantom-filtered."""
     _t0 = _time.monotonic()
     query = str(query)[:MAX_QUERY_CHARS] if query else ""
     try:
@@ -201,40 +225,64 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False):
     except (ValueError, TypeError):
         top_k = 5
     current_branch = branch or get_current_branch()
-
     maybe_reload_recall_counts()
 
-    idx = load_index(memory_dir)
-    if idx is None:
-        return {"error": "No TF-IDF index found. Ensure SessionStart ran.", "results": [], "total_indexed": 0}
-
-    vectors = idx.get("vectors", {})
-    idf = idx.get("idf", {})
-
-    # Load project-specific aliases for query expansion
-    alias_map = _get_alias_map(memory_dir)
-
-    query_vec, mag_q = _build_query_vector(query, idf, alias_map or None)
-    if not query_vec:
-        return {"error": "Empty query", "results": [], "total_indexed": len(vectors)}
-    if mag_q == 0:
-        return {"results": [], "total_indexed": len(vectors), "note": "Terms too common or unindexed"}
-
-    candidates = _get_candidates(query_vec.keys(), idx.get("postings", {}), vectors)
-    results = _score_candidates(
-        query_vec, mag_q, candidates, vectors, idx.get("magnitudes", {}),
-        idx.get("metadata", {}), current_branch, top_k
+    tfidf_out = _tfidf_search_impl(
+        query, memory_dir, top_k * 4, current_branch,
     )
+    try:
+        from .vector import vector_search
+        vec_results = vector_search(memory_dir, query, top_k=top_k * 4)
+    except Exception as exc:
+        sys.stderr.write(
+            f"[search] vector path failed: {exc} - TF-IDF only\n"
+        )
+        vec_results = []
 
-    _format_results(results, compact, idx.get("metadata", {}), memory_dir)
+    from .config import RRF_K
+    scores: dict[str, float] = {}
+    for rank, r in enumerate(tfidf_out.get("results", [])):
+        scores[r["entity"]] = (
+            scores.get(r["entity"], 0.0) + 1.0 / (RRF_K + rank)
+        )
+    for rank, (name, _sc) in enumerate(vec_results):
+        scores[name] = scores.get(name, 0.0) + 1.0 / (RRF_K + rank)
 
+    current_entities = load_graph_entities(memory_dir)
+    idx = load_index(memory_dir) or {}
+    metadata = idx.get("metadata", {})
+
+    fused = []
+    for name, rrf in scores.items():
+        if name not in current_entities:
+            continue
+        eb = (metadata.get(name, {}).get("_branch", "")
+              or current_entities.get(name, {}).get("_branch", ""))
+        boost = _branch_boost(eb, current_branch, 0.5)
+        rc = recall_counts.get(name, 0)
+        adj = rrf * boost * (1.0 + _HEBBIAN_ALPHA * math.log1p(rc))
+        fused.append({
+            "entity": name,
+            "score": round(adj, 6),
+            "raw_score": round(rrf, 6),
+            "branch_boost": round(boost, 4),
+        })
+    fused.sort(key=lambda r: r["score"], reverse=True)
+    results = fused[:top_k]
+    _format_results(results, compact, metadata, memory_dir)
     if results:
         record_recalls([r["entity"] for r in results])
-
     session_stats["searches"] += 1
-    log_event("SEARCH", f'query="{query[:60]}" results={len(results)} latency={int((_time.monotonic() - _t0)*1000)}ms')
-
-    return {"results": results, "total_indexed": len(vectors), "current_branch": current_branch}
+    log_event(
+        "SEARCH",
+        f'query="{query[:60]}" results={len(results)} '
+        f'latency={int((_time.monotonic() - _t0) * 1000)}ms hybrid',
+    )
+    return {
+        "results": results,
+        "total_indexed": len(current_entities),
+        "current_branch": current_branch,
+    }
 
 
 def search_by_time(memory_dir, since=None, until=None, limit=20, branch_filter=None, entity_type=None):

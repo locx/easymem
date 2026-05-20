@@ -79,6 +79,27 @@ def prune_entities(entities, relations, recall_counts=None, max_age_days=90, dec
     pruned_names = set()
     kept = []
     for e in entities:
+        # Episode decay: unrecalled episodes prune past EPISODE_DECAY_DAYS
+        if e.get("entityType") == "episode":
+            try:
+                from maintenance import (
+                    EPISODE_DECAY_DAYS, EPISODE_SURVIVAL_RECALL,
+                )
+            except ImportError:
+                EPISODE_DECAY_DAYS = 14
+                EPISODE_SURVIVAL_RECALL = 2
+            ts = e.get("_updated") or e.get("_created", "")
+            if ts:
+                try:
+                    ep_dt = parse_iso_date(ts)
+                    age_days = (now_ts - ep_dt.timestamp()) / 86400
+                    rc = (recall_counts or {}).get(e.get("name", ""), 0)
+                    if (age_days > EPISODE_DECAY_DAYS
+                            and rc < EPISODE_SURVIVAL_RECALL):
+                        pruned_names.add(e.get("name", ""))
+                        continue
+                except Exception:
+                    pass
         name = e.get("name", "")
         if not name.strip():
             continue

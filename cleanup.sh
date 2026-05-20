@@ -349,6 +349,10 @@ cleanup_global() {
     printf "${RED}=== Global Cleanup ===${NC}\n"
 
     # 1. Remove ~/.claude/memory/ runtime directory
+    # Remove venv + sidecar + manifest (HF cache at ~/.cache/huggingface kept — shared)
+    rm -rf "${HOME}/.claude/memory/venv"
+    rm -f  "${HOME}/.claude/memory/.venv-python"
+    rm -f  "${HOME}/.claude/memory/.install-manifest"
     if [ -d "${CLAUDE_HOME}/memory" ]; then
         echo "  Found ~/.claude/memory/"
         if confirm "Delete ${CLAUDE_HOME}/memory/ ?"; then

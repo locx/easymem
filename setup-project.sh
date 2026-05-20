@@ -225,11 +225,38 @@ fi
 if [ -s "${GRAPH_FILE}" ]; then
     echo ""
     echo "[index] Building TF-IDF index..."
-    python3 "${CLAUDE_HOME}/memory/maintenance.py" "${PROJECT_DIR}" 2>/dev/null || true
+    MEM_PY="$(cat "${CLAUDE_HOME}/memory/.venv-python" 2>/dev/null || echo python3)"
+    "${MEM_PY}" "${CLAUDE_HOME}/memory/maintenance.py" "${PROJECT_DIR}" --force 2>/dev/null || true
     if [ -f "${MEMORY_DIR}/tfidf_index.json" ]; then
         IDX_KB=$(( $(wc -c < "${MEMORY_DIR}/tfidf_index.json" | tr -d ' ') / 1024 ))
         echo "  [ok] TF-IDF index: ${IDX_KB}KB"
     fi
+fi
+
+# ---- 8b. Per-project model preload (validates project-specific embed_model) ----
+PROJECT_MODEL=$(python3 -c "
+import json
+try:
+    with open('${MEMORY_DIR}/config.json') as f:
+        cfg = json.load(f)
+    print(cfg.get('embed_model', 'minishlab/potion-retrieval-32M'))
+except Exception:
+    print('minishlab/potion-retrieval-32M')
+" 2>/dev/null)
+
+MEM_PY="$(cat "${CLAUDE_HOME}/memory/.venv-python" 2>/dev/null || echo python3)"
+if [ -x "$MEM_PY" ] && [ "$MEM_PY" != "python3" ]; then
+    "$MEM_PY" -c "
+from model2vec import StaticModel
+StaticModel.from_pretrained('${PROJECT_MODEL}')
+print('  [ok] embed model ready: ${PROJECT_MODEL}')
+" || {
+        echo "  ERROR: failed to load project embed model: ${PROJECT_MODEL}"
+        echo "         Set embed_model in ${MEMORY_DIR}/config.json or re-run install.sh"
+        exit 1
+    }
+else
+    echo "  [skip] vector setup — run install.sh first to enable hybrid search"
 fi
 
 # ---- 9. Add Bash permission for mem commands in .claude/settings.json ----

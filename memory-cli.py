@@ -240,6 +240,69 @@ def _check_oversized_entities(entities, issues):
         )
 
 
+def _check_vector_layer(issues):
+    """Probe venv sidecar, install manifest, and HF model cache."""
+    import subprocess
+    status = {}
+    venv_py_file = os.path.expanduser(
+        "~/.claude/memory/.venv-python"
+    )
+    manifest_file = os.path.expanduser(
+        "~/.claude/memory/.install-manifest"
+    )
+
+    if not os.path.exists(venv_py_file):
+        issues.append(
+            ".venv-python sidecar missing - run install.sh"
+        )
+        status["venv"] = "missing"
+    else:
+        with open(venv_py_file) as f:
+            venv_py = f.read().strip()
+        if not os.path.exists(venv_py):
+            issues.append(f"venv python missing at {venv_py}")
+            status["venv"] = "missing"
+        else:
+            rc = subprocess.run(
+                [venv_py, "-c", "import model2vec"],
+                capture_output=True,
+            ).returncode
+            if rc != 0:
+                issues.append("model2vec import failed in venv")
+                status["venv"] = "import_failed"
+            else:
+                status["venv"] = "ok"
+
+    if not os.path.exists(manifest_file):
+        issues.append(
+            ".install-manifest missing - install incomplete"
+        )
+        status["manifest"] = "missing"
+    else:
+        try:
+            with open(manifest_file) as f:
+                manifest = json.load(f)
+            status["manifest"] = manifest.get("model", "?")
+        except (json.JSONDecodeError, OSError):
+            issues.append(".install-manifest unreadable")
+            status["manifest"] = "unreadable"
+
+    hf_cache_root = os.path.expanduser(
+        "~/.cache/huggingface/hub"
+    )
+    if os.path.exists(hf_cache_root) and any(
+        "potion-retrieval-32M" in d
+        for d in os.listdir(hf_cache_root)
+    ):
+        status["model_cache"] = "ok"
+    else:
+        issues.append(
+            "model not in HF cache - first search will download"
+        )
+        status["model_cache"] = "missing"
+    return status
+
+
 def _run_doctor(memory_dir):
     """Health check for the knowledge graph."""
     from collections import Counter
@@ -280,6 +343,8 @@ def _run_doctor(memory_dir):
         type_counts = Counter()
         issues.append("No graph.jsonl found")
 
+    vector = _check_vector_layer(issues)
+
     status = "healthy" if not issues else "issues_found"
     result = {
         "status": status,
@@ -290,6 +355,7 @@ def _run_doctor(memory_dir):
                 type_counts.most_common(10)
             ),
         },
+        "vector_layer": vector,
         "issues": issues,
         "issue_count": len(issues),
     }
@@ -300,6 +366,11 @@ def _run_doctor(memory_dir):
         print(
             f"  Graph: {g['entities']}e "
             f"{g['relations']}r"
+        )
+        print(
+            f"  Vector: venv={vector['venv']} "
+            f"model={vector['manifest']} "
+            f"cache={vector['model_cache']}"
         )
         if issues:
             print(f"\n  Issues ({len(issues)}):")

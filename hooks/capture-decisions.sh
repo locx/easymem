@@ -25,6 +25,8 @@ touch "$MARKER"
 
 # Stamp session-start timestamp here (Stop hook) for next session's diff
 MEMORY_DIR="${CLAUDE_PROJECT_DIR}/.memory"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
+MEM_PY="$(cat "${HOME}/.claude/memory/.venv-python" 2>/dev/null || echo python3)"
 LAST_START="${MEMORY_DIR}/.last-session-start"
 python3 -c "import time; open('${LAST_START}','w').write(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))" 2>/dev/null || true
 
@@ -71,6 +73,16 @@ PYEOF
             ACTIVITY="This session: +${NEW_C} new entities, ~${UPD_C} updated."
         fi
     fi
+fi
+
+NEW_HEAD=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "")
+LAST_HEAD="${MEMORY_DIR}/.last-session-head"
+if [ -n "$NEW_HEAD" ] && [ "$NEW_HEAD" != "$(cat "$LAST_HEAD" 2>/dev/null)" ]; then
+    COMMIT_MSG=$(git -C "$CLAUDE_PROJECT_DIR" log -1 --format=%s "$NEW_HEAD" \
+          2>/dev/null | head -c 200)
+    "${MEM_PY}" "${SCRIPT_DIR}/capture_tool_context.py" --mint-commit \
+        "${MEMORY_DIR}/graph.jsonl" "$NEW_HEAD" "$COMMIT_MSG" 2>/dev/null || true
+    echo "$NEW_HEAD" > "$LAST_HEAD"
 fi
 
 MEM="$HOME/.claude/memory/mem"

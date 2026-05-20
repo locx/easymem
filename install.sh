@@ -86,32 +86,64 @@ cp "${SCRIPT_DIR}/mem" "${MEMORY_DIR}/mem"
 chmod +x "${MEMORY_DIR}/mem"
 echo "  [ok] mem (CLI wrapper) → ${MEMORY_DIR}/"
 
-# Optional: orjson for faster graph I/O
-if python3 -c "import orjson" 2>/dev/null; then
-    echo "  [ok] orjson already installed"
+# --- Step 3b: Set up venv + install model2vec + pre-download model ---
+echo "[3b/5] Setting up vector retrieval venv..."
+
+VENV_DIR="${MEMORY_DIR}/venv"
+VENV_PY="${VENV_DIR}/bin/python3"
+VENV_PY_FILE="${MEMORY_DIR}/.venv-python"
+MANIFEST="${MEMORY_DIR}/.install-manifest"
+
+if [ ! -x "$VENV_PY" ]; then
+    python3 -m venv "$VENV_DIR" || {
+        echo "  ERROR: failed to create venv at $VENV_DIR"
+        exit 1
+    }
+    echo "  [ok] venv at $VENV_DIR"
 else
-    echo ""
-    echo "  orjson is an optional dependency that speeds up graph I/O by 3-10x."
-    echo "  The server works fine without it (falls back to stdlib json)."
-    printf "  Install orjson now? [y/N] "
-    read -r ans
-    case "$ans" in
-        [yY]|[yY][eE][sS])
-            _pip_out=$(python3 -m pip install --user "orjson>=3.9" 2>&1)
-            _pip_rc=$?
-            if [ $_pip_rc -eq 0 ]; then
-                echo "  [ok] orjson installed"
-            else
-                echo "  [warn] pip install failed (exit ${_pip_rc}) — continuing with stdlib json"
-                echo "         To install manually: python3 -m pip install --user 'orjson>=3.9'"
-                echo "         pip output: ${_pip_out}"
-            fi
-            ;;
-        *)
-            echo "  [skip] orjson — using stdlib json"
-            ;;
-    esac
+    echo "  [skip] venv already exists"
 fi
+
+"$VENV_PY" -m pip install --quiet --upgrade pip
+"$VENV_PY" -m pip install --quiet model2vec numpy orjson || {
+    echo "  ERROR: pip install failed in venv"
+    echo "  Retry: re-run install.sh"
+    exit 1
+}
+echo "  [ok] model2vec + numpy + orjson installed in venv"
+
+echo "  Pre-downloading model (one-time, ~32MB)..."
+"$VENV_PY" -c "
+from model2vec import StaticModel
+m = StaticModel.from_pretrained('minishlab/potion-retrieval-32M')
+print(f'  [ok] model loaded, dim={m.dim}')
+" || {
+    echo "  ERROR: model download failed."
+    echo "  Retry: re-run install.sh (HF cache is content-addressed,"
+    echo "  partial files do not poison a re-run)."
+    exit 1
+}
+
+# Write .venv-python sidecar (hooks read this to discover the interpreter)
+printf '%s\n' "$VENV_PY" > "$VENV_PY_FILE"
+echo "  [ok] $VENV_PY_FILE"
+
+# Write .install-manifest
+MODEL_REV=$("$VENV_PY" -c "
+from huggingface_hub import HfApi
+info = HfApi().model_info('minishlab/potion-retrieval-32M')
+print(info.sha or '')
+" 2>/dev/null || echo "")
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$MANIFEST" << MANIFEOF
+{
+  "model": "minishlab/potion-retrieval-32M",
+  "model_rev": "${MODEL_REV}",
+  "venv": "${VENV_DIR}",
+  "installed_at": "${NOW}"
+}
+MANIFEOF
+echo "  [ok] $MANIFEST"
 echo ""
 
 # --- Step 4: Deploy hook scripts to ~/.claude/hooks/ ---
