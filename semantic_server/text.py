@@ -107,7 +107,7 @@ def expand_synonyms(stemmed_word):
     return SYNONYM_MAP.get(stemmed_word, stemmed_word)
 
 def load_aliases(memory_dir):
-    """Load project-specific aliases from .memory/aliases.json."""
+    """Load project-specific aliases from .easymem/aliases.json."""
     aliases_path = os.path.join(memory_dir, "aliases.json")
     try:
         with open(aliases_path, encoding="utf-8") as f:

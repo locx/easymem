@@ -36,9 +36,12 @@ try:
     ).open() as _f:
         TOOLS = json.load(_f)
 except Exception as _e:
+    # Fail loud: an empty TOOLS list makes tools/list return nothing
+    # while tools/call still dispatches — confusing silent divergence.
     sys.stderr.write(
-        f"[memory] warn: tools_schema.json load failed: {_e}\n"
+        f"[memory] error: tools_schema.json load failed: {_e}\n"
     )
+    log_event("SCHEMA_LOAD_FAIL", str(_e))
     TOOLS = []
 
 _index_loaded = False
@@ -62,6 +65,7 @@ _TOOL_HANDLERS = {
         a.get("query", ""), md,
         a.get("top_k", 5),
         branch=a.get("branch"),
+        compact=a.get("compact", False),
     ),
     "traverse_relations": lambda a, md: traverse_relations(
         a.get("entity", ""), md,
@@ -94,6 +98,7 @@ _TOOL_HANDLERS = {
         update_decision_outcome(a, md),
     "list_decisions": lambda a, md: list_decisions(
         md, stale_days=a.get("stale_days"),
+        limit=a.get("limit", 50),
     ),
     "remove_observations": lambda a, md: remove_observations(
         a.get("entity", ""),
@@ -155,6 +160,18 @@ def handle_message(msg, memory_dir):
         }
 
     if method == "tools/call":
+        if not TOOLS:
+            # If schema load failed, callers should not be able to invoke
+            # tools — the divergence (tools/list empty, tools/call works)
+            # confuses clients silently.
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {
+                    "code": -32603,
+                    "message": "server schema unavailable",
+                },
+            }
         _ensure_index(memory_dir)
         tool_name = params.get("name", "")
         args = params.get("arguments") or {}

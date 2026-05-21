@@ -7,8 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
-import time
 import time as _time_mod
 
 try:
@@ -17,6 +17,21 @@ except ImportError:
     _fcntl = None
 
 _WARN_SCAN_LINE_BUDGET = 5_000
+
+# Persisted error/stderr from tool responses can carry credentials; scrub
+# before it lands in graph.jsonl where future searches surface it verbatim.
+_SECRET_RE = re.compile(
+    r"AKIA[0-9A-Z]{16}"
+    r"|gh[pousr]_[0-9A-Za-z]{20,}"
+    r"|sk-[0-9A-Za-z_\-]{20,}"
+    r"|xox[abpros]-[0-9A-Za-z\-]{10,}"
+    r"|Bearer\s+[A-Za-z0-9._~+/=\-]{20,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+)
+
+
+def _scrub(s: str) -> str:
+    return _SECRET_RE.sub("[REDACTED]", s) if s else s
 
 
 def _sha8(s: str) -> str:
@@ -40,8 +55,13 @@ def _current_branch(cwd: str = "") -> str:
 
 
 def _append_episode(graph_path: str, name: str,
-                    observations: list) -> None:
-    """Append an episode entity to graph.jsonl under flock."""
+                    observations: list,
+                    source: str = "") -> None:
+    """Append episode under the same .graph.lock maintenance.run holds.
+
+    Without this lock, an append racing maintenance's read+rewrite is
+    silently dropped on os.replace.
+    """
     entry = {
         "type": "entity",
         "name": name,
@@ -51,19 +71,36 @@ def _append_episode(graph_path: str, name: str,
         "_created": _iso_now(),
         "_updated": _iso_now(),
     }
+    if source:
+        entry["_source"] = source
     line = json.dumps(entry, separators=(",", ":")) + "\n"
-    with open(graph_path, "a", encoding="utf-8") as f:
-        if _fcntl is not None:
+    lock_path = os.path.join(
+        os.path.dirname(graph_path) or ".", ".graph.lock"
+    )
+    lock_fd = None
+    if _fcntl is not None:
+        try:
+            lock_fd = open(lock_path, "a")
+            _fcntl.flock(lock_fd.fileno(), _fcntl.LOCK_EX)
+        except OSError:
+            if lock_fd is not None:
+                lock_fd.close()
+                lock_fd = None
+    try:
+        with open(graph_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
             try:
-                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX)
+                os.fsync(f.fileno())
             except OSError:
                 pass
-        f.write(line)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
+    finally:
+        if lock_fd is not None:
+            try:
+                _fcntl.flock(lock_fd.fileno(), _fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock_fd.close()
 
 
 def mint_error(input_path: str, graph_path: str) -> None:
@@ -79,6 +116,8 @@ def mint_error(input_path: str, graph_path: str) -> None:
     tool = data.get("tool_name", "")
     target = (data.get("tool_input", {}).get("file_path")
               or data.get("tool_input", {}).get("command", ""))[:200]
+    target = _scrub(target)
+    err = _scrub(err)
     stable_key = f"{target}|{err[:200]}"
     name = f"episode:err:{_sha8(stable_key)}"
     obs = [
@@ -86,7 +125,10 @@ def mint_error(input_path: str, graph_path: str) -> None:
         f"target={target}",
         f"msg={err[:300]}",
     ]
-    _append_episode(graph_path, name, obs)
+    _append_episode(
+        graph_path, name, obs,
+        source="hook:capture-tool-context:error",
+    )
 
 
 CHURN_THRESHOLD = 3
@@ -110,8 +152,23 @@ def mint_churn(input_path: str, graph_path: str) -> None:
         c if c.isalnum() or c in "_-" else "_" for c in sid
     )[:64]
     path_hash = _sha8(fp)
-    marker = f"/tmp/.claude-mem-churn-{safe_sid}-{path_hash}"
+    marker = f"/tmp/.claude-easymem-churn-{safe_sid}-{path_hash}"
     sentinel = marker + ".minted"
+    # Re-arm after the debounce window: stale sentinel (and its companion
+    # marker) would otherwise block all future mints for this (sid, file).
+    try:
+        sent_age = _time_mod.time() - os.path.getmtime(sentinel)
+        if sent_age >= CHURN_WINDOW_S:
+            try:
+                os.unlink(sentinel)
+            except OSError:
+                pass
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+    except OSError:
+        pass
     try:
         with open(marker, "ab") as f:
             f.write(b".")
@@ -119,11 +176,9 @@ def mint_churn(input_path: str, graph_path: str) -> None:
         return
     try:
         size = os.path.getsize(marker)
-        mtime = os.path.getmtime(marker)
     except OSError:
         return
-    if (size < CHURN_THRESHOLD
-            or (_time_mod.time() - mtime) >= CHURN_WINDOW_S):
+    if size < CHURN_THRESHOLD:
         return
     try:
         fd = os.open(
@@ -138,7 +193,10 @@ def mint_churn(input_path: str, graph_path: str) -> None:
         f"<{CHURN_WINDOW_S // 60}min",
         f"file={fp}",
     ]
-    _append_episode(graph_path, name, obs)
+    _append_episode(
+        graph_path, name, obs,
+        source="hook:capture-tool-context:churn",
+    )
 
 
 def mint_commit(graph_path: str, sha: str, msg: str) -> None:
@@ -146,11 +204,15 @@ def mint_commit(graph_path: str, sha: str, msg: str) -> None:
     if not sha:
         return
     name = f"episode:commit:{sha[:8]}"
+    safe_msg = _scrub((msg or "")[:200])
     obs = [
         f"[COMMIT] sha={sha}",
-        f"msg={(msg or '')[:200]}",
+        f"msg={safe_msg}",
     ]
-    _append_episode(graph_path, name, obs)
+    _append_episode(
+        graph_path, name, obs,
+        source="hook:capture-tool-context:commit",
+    )
 
 
 def _check_file_warnings(graph_path, filename, session_id):
@@ -166,10 +228,10 @@ def _check_file_warnings(graph_path, filename, session_id):
     abs_path = os.path.abspath(filename)
     path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
     marker = (
-        f"/tmp/.claude-mem-warned-{safe_sid}-{path_hash}"
+        f"/tmp/.claude-easymem-warned-{safe_sid}-{path_hash}"
     )
     try:
-        marker_age = time.time() - os.path.getmtime(marker)
+        marker_age = _time_mod.time() - os.path.getmtime(marker)
         if 0 <= marker_age < 86400:  # suppress for 24h only
             return ""
         os.unlink(marker)  # expired — re-surface warning

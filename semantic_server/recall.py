@@ -64,7 +64,6 @@ def maybe_reload_recall_counts():
     try:
         st = os.stat(recall_path)
         mtime = st.st_mtime
-        file_size = st.st_size
     except OSError:
         return
     if mtime == recall_mtime:

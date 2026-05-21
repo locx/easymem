@@ -1,6 +1,6 @@
 #!/bin/bash
-# Export a project's memory graph to a portable JSON bundle.
-# Usage: export-memory.sh [project_dir] [output_file]
+# Export a project's EasyMem graph to a portable JSON bundle.
+# Usage: export-easymem.sh [project_dir] [output_file]
 #
 # Creates a self-contained JSON file with graph data + metadata.
 # Transfer via git, cloud storage, or sneakernet.
@@ -12,8 +12,8 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd)" || {
     echo "ERROR: Directory not found: ${1:-.}"
     exit 1
 }
-MEMORY_DIR="${PROJECT_DIR}/.memory"
-GRAPH="${MEMORY_DIR}/graph.jsonl"
+EASYMEM_DIR="${PROJECT_DIR}/.easymem"
+GRAPH="${EASYMEM_DIR}/graph.jsonl"
 
 if [ ! -f "$GRAPH" ]; then
     echo "ERROR: No graph found at ${GRAPH}"
@@ -24,14 +24,14 @@ fi
 GRAPH_SIZE=$(wc -c < "$GRAPH" | tr -d ' ')
 if [ "$GRAPH_SIZE" -gt 52428800 ]; then
     echo "ERROR: Graph too large (${GRAPH_SIZE} bytes, max 50MB)"
-    echo "Run maintenance to prune first: python3 ~/.claude/memory/maintenance.py ${PROJECT_DIR}"
+    echo "Run maintenance to prune first: python3 ~/.claude/easymem/maintenance.py ${PROJECT_DIR}"
     exit 1
 fi
 
 # Default output: project-name_memory_YYYY-MM-DD.json
 PROJECT_NAME=$(basename "$PROJECT_DIR")
 DATE=$(date +%Y-%m-%d)
-OUTPUT="${2:-${PROJECT_NAME}_memory_${DATE}.json}"
+OUTPUT="${2:-${PROJECT_NAME}_easymem_${DATE}.json}"
 
 python3 - "$GRAPH" "$PROJECT_NAME" "$OUTPUT" << 'PYEOF'
 import json, os, sys, time
@@ -68,7 +68,7 @@ try:
     with open(tmp, 'w', encoding='utf-8') as out:
         # Write header as streaming fields (no slice hack)
         out.write('{\n')
-        out.write('  "format": "easy-memory-claude-export",\n')
+        out.write('  "format": "easymem-export",\n')
         out.write('  "version": 1,\n')
         out.write('  "exported": ')
         json.dump(time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), out)

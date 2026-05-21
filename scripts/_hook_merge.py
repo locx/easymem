@@ -5,7 +5,8 @@ import os
 import sys
 
 _MEMORY_COMMANDS = {
-    '$HOME/.claude/hooks/prime-memory.sh',
+    '$HOME/.claude/hooks/prime-easymem.sh',
+    '$HOME/.claude/hooks/prime-on-compact.sh',
     '$HOME/.claude/hooks/capture-decisions.sh',
     '$HOME/.claude/hooks/nudge-setup.sh',
     '$HOME/.claude/hooks/capture-tool-context.sh',
@@ -65,7 +66,7 @@ def mode_add(cfg, path, hook_file, event, timeout=None):
     return True
 
 
-def mode_strip(cfg, path, hook_file, event, dry_run=False):
+def mode_strip(cfg, path, hook_file, event):
     hooks = cfg.get('hooks', {})
     if not hooks:
         print(f'  [skip] {path} — no hooks section')

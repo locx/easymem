@@ -11,6 +11,11 @@ from .config import EMBED_MODEL, EMBED_DIM
 
 _model = None
 _NORM_EPS = 1e-8
+# RRF fuses results without an absolute score; floor candidates whose
+# cosine is too low to be meaningful — they otherwise displace real hits.
+# int8 quantization on 256-dim embeddings has ~1/127 per-dim noise; a
+# tight floor (0.15) drops legitimate semantically-related hits.
+VECTOR_MIN_SIM = 0.05
 
 _NAME_DTYPE = "U256"
 _MODEL_DTYPE = "U128"
@@ -134,14 +139,21 @@ def vector_search(
     q_norm = np.linalg.norm(q_vec)
     if q_norm < _NORM_EPS:
         return []
-    q_int8 = (q_vec / q_norm * 127.0).astype(np.int8)
+    # Mirror l2_quantize_int8 (round + clip) so query and indexed vectors
+    # share the same quantization regime; .astype alone biases negatives.
+    q_int8 = np.clip(
+        np.round(q_vec / q_norm * 127.0), -127, 127,
+    ).astype(np.int8)
     scores = (
         idx["vecs"].astype(np.int32)
         @ q_int8[0].astype(np.int32)
     ) / (127.0 * 127.0)
     top = np.argsort(-scores)[:top_k]
+    # Floor: near-zero / negative similarities are noise; allowing them
+    # into RRF fusion lets vector misfires outrank legitimate hits.
     return [
         (idx["names"][i], float(scores[i])) for i in top
+        if scores[i] > VECTOR_MIN_SIM
     ]
 
 
@@ -159,7 +171,8 @@ def rebuild_if_stale(
 
     if os.path.exists(path) and os.path.exists(meta_path):
         try:
-            prev = open(meta_path).read().strip().split("|")
+            with open(meta_path) as _mf:
+                prev = _mf.read().strip().split("|")
             prev_model = prev[0]
             prev_count = int(prev[1])
             prev_mtime = float(prev[2])

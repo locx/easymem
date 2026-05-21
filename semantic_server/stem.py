@@ -4,12 +4,8 @@ Extracted from maintenance.py to reduce bloat and share with search.
 """
 from collections import OrderedDict
 
-# Table-driven suffix rules for each step: (suffix, min_len, replacement)
-_STEP1_RULES = [
-    ('ies', 4, 'i'),
-    ('sses', 4, 'ss'),
-    ('ness', 4, ''),
-]
+# Table-driven suffix rules. Step 1 stays hand-written below because
+# it needs a non-suffix-table check (trailing-s with 'ss'/'us' exception).
 _STEP2_RULES = [
     ('ated', 6, 'ate'),
     ('ied', 4, 'i'),

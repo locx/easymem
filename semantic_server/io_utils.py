@@ -77,6 +77,7 @@ def merge_pending(
     *,
     lock=None,
     invalidate_cb: Optional[Callable[[], None]] = None,
+    do_fsync: bool = True,
 ) -> Tuple[int, int]:
     """Merge .pending sidecar into graph_file atomically.
 
@@ -139,6 +140,11 @@ def merge_pending(
                     except (TypeError, ValueError, OverflowError):
                         continue
                 gf.flush()
+                if do_fsync:
+                    try:
+                        os.fsync(gf.fileno())
+                    except OSError:
+                        pass
         except OSError as exc:
             _log.warning("merge_pending: append failed: %s", exc)
             return (0, 0)

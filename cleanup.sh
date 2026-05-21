@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cleanup utility — removes easy-memory-claude artifacts.
+# Cleanup utility — removes easymem artifacts.
 # Modes: project [dir] | global | all [dir]
 # Options: --yes (skip prompts), --dry-run
 # Safe: prompts before each destructive step unless --yes flag.
@@ -16,10 +16,10 @@ usage() {
     echo "Usage: cleanup.sh <mode> [options]"
     echo ""
     echo "Modes:"
-    echo "  project [dir]   Remove .memory/, .mcp.json memory entry,"
-    echo "                  .vscode/mcp.json memory entry from a project"
+    echo "  project [dir]   Remove .easymem/, .gitignore + CLAUDE.md"
+    echo "                  entries, and easymem permission from a project"
     echo "                  (defaults to current directory)"
-    echo "  global          Remove ~/.claude/memory/, hooks, settings entries"
+    echo "  global          Remove ~/.claude/easymem/, hooks, settings entries"
     echo "  all [dir]       Both global + project cleanup"
     echo ""
     echo "Options:"
@@ -91,162 +91,34 @@ remove_path() {
 }
 
 # --- Project cleanup ---
-# Steps: 1) .memory/ dir  2) .mcp.json servers  3) .vscode/mcp.json servers
-#        4) .gitignore entries  5) CLAUDE.md plugin section  6) temp markers
+# Steps: 1) .easymem/ dir  2) .gitignore entries  3) CLAUDE.md plugin section
+#        4) .claude/settings.json easymem permission  5) temp markers
 cleanup_project() {
     local dir="$1"
     echo ""
     printf "${RED}=== Project Cleanup: ${dir} ===${NC}\n"
 
-    # 1. Remove .memory/ directory
-    if [ -d "${dir}/.memory" ]; then
+    # 1. Remove .easymem/ directory
+    if [ -d "${dir}/.easymem" ]; then
         ENTITY_COUNT=0
-        if [ -f "${dir}/.memory/graph.jsonl" ]; then
-            ENTITY_COUNT=$(grep -c '"type":"entity"' "${dir}/.memory/graph.jsonl" 2>/dev/null || echo 0)
+        if [ -f "${dir}/.easymem/graph.jsonl" ]; then
+            ENTITY_COUNT=$(grep -c '"type":"entity"' "${dir}/.easymem/graph.jsonl" 2>/dev/null || echo 0)
         fi
-        echo "  Found .memory/ with ~${ENTITY_COUNT} entities"
-        if confirm "Delete ${dir}/.memory/ ?"; then
-            remove_path "${dir}/.memory" ".memory/"
+        echo "  Found .easymem/ with ~${ENTITY_COUNT} entities"
+        if confirm "Delete ${dir}/.easymem/ ?"; then
+            remove_path "${dir}/.easymem" ".easymem/"
         fi
     else
-        echo "  [skip] .memory/ — not found"
+        echo "  [skip] .easymem/ — not found"
     fi
 
-    # 2. Remove memory server entries from .mcp.json
-    if [ -f "${dir}/.mcp.json" ]; then
-        python3 - "${dir}/.mcp.json" "$DRY_RUN" << 'PYEOF'
-import json, sys, os
-
-mcp_path = sys.argv[1]
-dry_run = sys.argv[2] == 'true'
-
-try:
-    with open(mcp_path, encoding='utf-8') as f:
-        cfg = json.load(f)
-except (json.JSONDecodeError, ValueError, OSError):
-    print('  [skip] .mcp.json — unreadable')
-    sys.exit(0)
-
-servers = cfg.get('mcpServers', {})
-removed = []
-for key in list(servers.keys()):
-    s = servers[key]
-    if not isinstance(s, dict):
-        continue
-    args = s.get('args', [])
-    env = s.get('env', {})
-    is_memory = (
-        'semantic_server.py' in str(args)
-        or 'server-memory' in str(args)
-        or 'MEMORY_DIR' in env
-        or 'MEMORY_FILE_PATH' in env
-        or key in ('memory', 'memory-search',
-                    'memory-semantic-search')
-    )
-    if is_memory:
-        removed.append(key)
-        del servers[key]
-
-if not removed:
-    print('  [skip] .mcp.json — no memory servers found')
-    sys.exit(0)
-
-if dry_run:
-    for k in removed:
-        print(f'  [dry-run] Would remove server "{k}" from .mcp.json')
-    sys.exit(0)
-
-if servers:
-    tmp = mcp_path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=2)
-        f.write('\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, mcp_path)
-else:
-    os.unlink(mcp_path)
-
-for k in removed:
-    print(f'  \033[0;32m[removed]\033[0m .mcp.json server "{k}"')
-PYEOF
-    else
-        echo "  [skip] .mcp.json — not found"
-    fi
-
-    # 3. Remove memory server entries from .vscode/mcp.json
-    if [ -f "${dir}/.vscode/mcp.json" ]; then
-        python3 - "${dir}/.vscode/mcp.json" "$DRY_RUN" << 'PYEOF'
-import json, sys, os
-
-mcp_path = sys.argv[1]
-dry_run = sys.argv[2] == 'true'
-
-try:
-    with open(mcp_path, encoding='utf-8') as f:
-        cfg = json.load(f)
-except (json.JSONDecodeError, ValueError, OSError):
-    print('  [skip] .vscode/mcp.json — unreadable')
-    sys.exit(0)
-
-servers = cfg.get('servers', {})
-removed = []
-for key in list(servers.keys()):
-    s = servers[key]
-    if not isinstance(s, dict):
-        continue
-    args = s.get('args', [])
-    env = s.get('env', {})
-    is_memory = (
-        'semantic_server.py' in str(args)
-        or 'server-memory' in str(args)
-        or 'MEMORY_DIR' in env
-        or 'MEMORY_FILE_PATH' in env
-        or key in ('memory', 'memory-search',
-                    'memory-semantic-search')
-    )
-    if is_memory:
-        removed.append(key)
-        del servers[key]
-
-if not removed:
-    print('  [skip] .vscode/mcp.json — no memory servers found')
-    sys.exit(0)
-
-if dry_run:
-    for k in removed:
-        print(f'  [dry-run] Would remove server "{k}" from .vscode/mcp.json')
-    sys.exit(0)
-
-if servers:
-    tmp = mcp_path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=2)
-        f.write('\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, mcp_path)
-else:
-    os.unlink(mcp_path)
-    # Remove .vscode/ if now empty
-    vscode_dir = os.path.dirname(mcp_path)
-    if os.path.isdir(vscode_dir) and not os.listdir(vscode_dir):
-        os.rmdir(vscode_dir)
-
-for k in removed:
-    print(f'  \033[0;32m[removed]\033[0m .vscode/mcp.json server "{k}"')
-PYEOF
-    else
-        echo "  [skip] .vscode/mcp.json — not found"
-    fi
-
-    # 4. Remove .memory/ lines from .gitignore
+    # 2. Remove .easymem/ lines from .gitignore
     if [ -f "${dir}/.gitignore" ]; then
-        if grep -q '\.memory/' "${dir}/.gitignore" 2>/dev/null; then
+        if grep -q '\.easymem/' "${dir}/.gitignore" 2>/dev/null; then
             if $DRY_RUN; then
-                echo "  [dry-run] Would remove .memory/ lines from .gitignore"
+                echo "  [dry-run] Would remove .easymem/ lines from .gitignore"
             else
-                # Remove .memory/ line and preceding "# Memory" comment
+                # Remove .easymem/ line and preceding "# Memory" comment
                 python3 - "${dir}/.gitignore" << 'PYEOF'
 import sys
 
@@ -258,7 +130,7 @@ out = []
 skip_next = False
 for i, line in enumerate(lines):
     stripped = line.strip()
-    if stripped == '.memory/' or stripped == '.memory':
+    if stripped == '.easymem/' or stripped == '.easymem':
         # Also remove preceding "# Memory" comment
         if out and out[-1].strip() == '# Memory':
             out.pop()
@@ -273,60 +145,84 @@ if out:
 
 with open(path, 'w', encoding='utf-8') as f:
     f.writelines(out)
-print('  \033[0;32m[removed]\033[0m .memory/ from .gitignore')
+print('  \033[0;32m[removed]\033[0m .easymem/ from .gitignore')
 PYEOF
             fi
         else
-            echo "  [skip] .gitignore — no .memory/ entry"
+            echo "  [skip] .gitignore — no .easymem/ entry"
         fi
     fi
 
-    # 5. Remove Memory Graph Plugin section from CLAUDE.md
+    # 3. Remove EasyMem Plugin section from CLAUDE.md
     if [ -f "${dir}/CLAUDE.md" ]; then
-        if grep -qE '## Memory Graph( Plugin)?' "${dir}/CLAUDE.md" 2>/dev/null; then
+        if grep -qE '## EasyMem' "${dir}/CLAUDE.md" 2>/dev/null; then
             if $DRY_RUN; then
-                echo "  [dry-run] Would remove Memory Graph section from CLAUDE.md"
-            elif confirm "Remove Memory Graph section from CLAUDE.md?"; then
-                python3 - "${dir}/CLAUDE.md" << 'PYEOF'
-import sys, os, re
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as f:
-    content = f.read()
-
-# Match both old "## Memory Graph Plugin" and new "## Memory Graph"
-m = re.search(r'^## Memory Graph( Plugin)?', content, re.MULTILINE)
-if not m:
-    sys.exit(0)
-start = m.start()
-marker = m.group(0)
-
-# Find end: next ## heading or EOF
-end = content.find("\n## ", start + len(marker))
-if end < 0:
-    old_section = content[start:]
-else:
-    old_section = content[start:end]
-
-content = content.replace(old_section, "").rstrip() + "\n"
-
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    f.write(content)
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(tmp, path)
-print('  \033[0;32m[removed]\033[0m Memory Graph section from CLAUDE.md')
-PYEOF
+                echo "  [dry-run] Would remove EasyMem section from CLAUDE.md"
+            elif confirm "Remove EasyMem section from CLAUDE.md?"; then
+                python3 "${SCRIPT_DIR}/scripts/_strip_memory_section.py" "${dir}/CLAUDE.md"
+                printf '  \033[0;32m[removed]\033[0m EasyMem section from CLAUDE.md\n'
             fi
         else
-            echo "  [skip] CLAUDE.md — no Memory Graph Plugin section"
+            echo "  [skip] CLAUDE.md — no EasyMem section"
         fi
     else
         echo "  [skip] CLAUDE.md — not found"
     fi
 
-    # 6. Clear temp nudge marker for this project
+    # 4. Remove easymem Bash permission from .claude/settings.json (symmetric
+    #    with setup-project.sh which adds it).
+    PROJ_SETTINGS="${dir}/.claude/settings.json"
+    if [ -f "$PROJ_SETTINGS" ]; then
+        python3 - "$PROJ_SETTINGS" "$DRY_RUN" << 'PYEOF'
+import json, os, sys
+
+path = sys.argv[1]
+dry_run = sys.argv[2] == 'true'
+target = 'Bash($HOME/.claude/easymem/easymem *)'
+
+try:
+    with open(path, encoding='utf-8') as f:
+        cfg = json.load(f)
+except (json.JSONDecodeError, ValueError, OSError):
+    print('  [skip] .claude/settings.json — unreadable')
+    sys.exit(0)
+
+allow = cfg.get('permissions', {}).get('allow', [])
+if target not in allow:
+    print('  [skip] .claude/settings.json — no easymem permission entry')
+    sys.exit(0)
+
+if dry_run:
+    print(f'  [dry-run] Would remove permission "{target}"')
+    sys.exit(0)
+
+allow.remove(target)
+# Tidy up empty containers
+if not allow:
+    cfg['permissions'].pop('allow', None)
+if not cfg.get('permissions'):
+    cfg.pop('permissions', None)
+
+if cfg:
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2)
+        f.write('\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+else:
+    os.unlink(path)
+    # Remove .claude/ if now empty
+    cdir = os.path.dirname(path)
+    if os.path.isdir(cdir) and not os.listdir(cdir):
+        os.rmdir(cdir)
+
+print('  \033[0;32m[removed]\033[0m easymem permission from .claude/settings.json')
+PYEOF
+    fi
+
+    # 5. Clear temp nudge marker for this project
     if ! $DRY_RUN; then
         # Compute same hash as nudge-setup.sh
         _proj_hash=""
@@ -337,40 +233,37 @@ PYEOF
         else
             _proj_hash=$(echo -n "$dir" | cksum | cut -d' ' -f1)
         fi
-        rm -f "/tmp/.claude-mem-nudge-${_proj_hash}" 2>/dev/null || true
+        rm -f "/tmp/.claude-easymem-nudge-${_proj_hash}" 2>/dev/null || true
     fi
 }
 
 # --- Global cleanup ---
-# Steps: 1) ~/.claude/memory/  2) hook scripts  3) settings.json hook wiring
-#        4) temp markers
+# Steps: 1) ~/.claude/easymem/ (incl. venv+sidecar+manifest)
+#        2) hook scripts  3) settings.json hook wiring  4) temp markers
 cleanup_global() {
     echo ""
     printf "${RED}=== Global Cleanup ===${NC}\n"
 
-    # 1. Remove ~/.claude/memory/ runtime directory
-    # Remove venv + sidecar + manifest (HF cache at ~/.cache/huggingface kept — shared)
-    rm -rf "${HOME}/.claude/memory/venv"
-    rm -f  "${HOME}/.claude/memory/.venv-python"
-    rm -f  "${HOME}/.claude/memory/.install-manifest"
-    if [ -d "${CLAUDE_HOME}/memory" ]; then
-        echo "  Found ~/.claude/memory/"
-        if confirm "Delete ${CLAUDE_HOME}/memory/ ?"; then
-            remove_path "${CLAUDE_HOME}/memory" "~/.claude/memory/"
+    # 1. Remove ~/.claude/easymem/ runtime directory (includes venv, sidecar,
+    #    manifest). HF cache at ~/.cache/huggingface kept — shared across installs.
+    if [ -d "${CLAUDE_HOME}/easymem" ]; then
+        echo "  Found ~/.claude/easymem/"
+        if confirm "Delete ${CLAUDE_HOME}/easymem/ ?"; then
+            remove_path "${CLAUDE_HOME}/easymem" "~/.claude/easymem/"
         fi
     else
-        echo "  [skip] ~/.claude/memory/ — not found"
+        echo "  [skip] ~/.claude/easymem/ — not found"
     fi
 
     # 2. Remove deployed hook scripts
-    HOOKS=(prime-memory.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
+    HOOKS=(prime-easymem.sh prime-on-compact.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
     for hook in "${HOOKS[@]}"; do
         if [ -e "${CLAUDE_HOME}/hooks/${hook}" ]; then
             if confirm "Remove hook ${hook}?"; then
                 remove_path "${CLAUDE_HOME}/hooks/${hook}" "~/.claude/hooks/${hook}"
             fi
         else
-            echo "  [skip] ~.claude/hooks/${hook} — not found"
+            echo "  [skip] ~/.claude/hooks/${hook} — not found"
         fi
     done
     # Remove hooks dir if empty
@@ -380,7 +273,7 @@ cleanup_global() {
         fi
     fi
 
-    # 3. Remove memory hook wiring from settings.json
+    # 3. Remove easymem hook wiring from settings.json
     if [ -f "${CLAUDE_HOME}/settings.json" ]; then
         _dry_flag=""
         if $DRY_RUN; then _dry_flag="--dry-run"; fi
@@ -390,10 +283,10 @@ cleanup_global() {
 
     # 4. Clean up all temp markers
     if $DRY_RUN; then
-        echo "  [dry-run] Would remove /tmp/.claude-mem-* markers"
-    elif confirm "Remove /tmp/.claude-mem-* temp markers?"; then
-        rm -f /tmp/.claude-mem-* 2>/dev/null || true
-        echo "  [removed] /tmp/.claude-mem-* markers"
+        echo "  [dry-run] Would remove /tmp/.claude-easymem-* markers"
+    elif confirm "Remove /tmp/.claude-easymem-* temp markers?"; then
+        rm -f /tmp/.claude-easymem-* 2>/dev/null || true
+        echo "  [removed] /tmp/.claude-easymem-* markers"
     fi
 }
 

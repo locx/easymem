@@ -1,6 +1,6 @@
 """Shared startup wiring used by both CLI and MCP server paths.
 
-Keeps CLI (memory-cli.py) and server (semantic_server.server) in sync —
+Keeps CLI (easymem-cli.py) and server (semantic_server.server) in sync —
 a bug fixed in one path won't drift in the other.
 """
 import os
@@ -22,7 +22,7 @@ def ensure_memory_dir(memory_dir):
         return True
     except OSError as exc:
         sys.stderr.write(
-            f"{SERVER_NAME}: warning: MEMORY_DIR "
+            f"{SERVER_NAME}: warning: EASYMEM_DIR "
             f"'{memory_dir}' could not be created: {exc}\n"
         )
         return False
@@ -40,7 +40,7 @@ def bootstrap(memory_dir, load_index_on_start=True):
     if not ensure_memory_dir(memory_dir):
         return False
 
-    # MEMORY_DIR convention: <project>/.memory
+    # EASYMEM_DIR convention: <project>/.easymem
     project_dir = os.path.dirname(memory_dir)
     init_branch(project_dir)
 

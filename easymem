@@ -1,0 +1,56 @@
+#!/bin/bash
+# easymem — CLI for the EasyMem knowledge graph memory system.
+# Resolves EASYMEM_DIR from project root upwards automatically.
+# Usage:
+#   easymem search auth                  # Search graph
+#   easymem search auth --top-k 5        # Limit results
+#   easymem recall auth                  # Search + 1-hop graph neighbors
+#   easymem write '{"entities":[...]}'   # Create graph entities/relations
+#   easymem decide '{"title":"..."}'     # Decision journal
+#   easymem remove '{"entity_names":[]}' # Delete graph entities
+#   easymem status                       # Graph health
+#   easymem doctor                       # Diagnostics
+#   easymem rebuild                      # Rebuild TF-IDF index
+#   easymem diff                         # Changes since last session
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+find_root() {
+    local d="$PWD"
+
+    # 1. Look for existing .easymem upwards
+    while [ "$d" != "/" ] && [ -n "$d" ]; do
+        if [ -d "$d/.easymem" ]; then
+            echo "$d"
+            return
+        fi
+        d="$(dirname "$d")"
+    done
+
+    # 2. Look for git root
+    local _git_root
+    _git_root="$(git rev-parse --show-toplevel 2>/dev/null)" && {
+        echo "$_git_root"
+        return
+    }
+
+    # 3. Look for common project markers upwards
+    d="$PWD"
+    while [ "$d" != "/" ] && [ -n "$d" ]; do
+        if [ -f "$d/package.json" ] || [ -f "$d/pyproject.toml" ] || [ -f "$d/requirements.txt" ] || [ -f "$d/pom.xml" ]; then
+            echo "$d"
+            return
+        fi
+        d="$(dirname "$d")"
+    done
+
+    # 4. Fallback to current directory
+    echo "$PWD"
+}
+
+PROJECT_ROOT="$(find_root)"
+export EASYMEM_DIR="${EASYMEM_DIR:-${PROJECT_ROOT}/.easymem}"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+exec python3 "${SCRIPT_DIR}/easymem-cli.py" "$@"

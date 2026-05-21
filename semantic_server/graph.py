@@ -233,6 +233,7 @@ def _do_full_parse(graph_path, mtime):
     entity_cache["offset"] = offset
     entity_cache["append_only"] = False
     entity_cache["obs_keys"] = obs_keys
+    entity_cache["obs_keys_size"] = None
     entity_cache.pop("_pre_invalidate_mtime", None)
     relation_cache["data"] = relations
     relation_cache["mtime"] = mtime
@@ -338,6 +339,7 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
     entity_cache["size"] = estimate_size(existing)
     entity_cache["append_only"] = False
     entity_cache["obs_keys"] = existing_obs_keys
+    entity_cache["obs_keys_size"] = None
     entity_cache.pop("_pre_invalidate_mtime", None)
     if relation_cache["data"] is not None:
         relation_cache["mtime"] = mtime
@@ -417,6 +419,7 @@ class GraphLock:
             self._fd = open(self._path, "a")
         except OSError:
             return self
+        # try/finally so signals (KeyboardInterrupt etc.) don't leak the fd.
         try:
             delay = 0.01
             deadline = time.monotonic() + GRAPH_LOCK_TIMEOUT
@@ -435,12 +438,10 @@ class GraphLock:
                 "warn: graph lock timeout after "
                 f"{GRAPH_LOCK_TIMEOUT}s\n"
             )
-        except Exception:
-            self._fd.close()
-            self._fd = None
-            raise
-        self._fd.close()
-        self._fd = None
+        finally:
+            if not self.acquired and self._fd is not None:
+                self._fd.close()
+                self._fd = None
         return self
 
     def __exit__(self, *exc):
@@ -497,7 +498,7 @@ def check_graph_size(memory_dir):
 
 
 def append_jsonl(memory_dir, entries, do_fsync=True):
-    """Append JSONL lines under lock; fsync after lock release."""
+    """Append JSONL lines under lock; fsync inside the locked block."""
     graph_path = os.path.join(memory_dir, "graph.jsonl")
     lines = []
     with GraphLock(memory_dir) as lock:
@@ -513,12 +514,11 @@ def append_jsonl(memory_dir, entries, do_fsync=True):
         with open(graph_path, "a", encoding="utf-8") as f:
             f.writelines(lines)
             f.flush()
-    if do_fsync and lines:
-        try:
-            with open(graph_path, "a", encoding="utf-8") as f:
-                os.fsync(f.fileno())
-        except OSError:
-            pass
+            if do_fsync:
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
     return True
 
 
@@ -591,4 +591,7 @@ def rewrite_graph(memory_dir, entities_dict, relations):
             except OSError:
                 pass
             raise
-        invalidate_caches()
+        # Rewrite touches entity/relation data but never tfidf_index.json;
+        # keep the on-disk index cache hot to avoid a costly reload.
+        clear_entity_cache()
+        clear_relation_cache()

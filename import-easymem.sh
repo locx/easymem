@@ -1,6 +1,6 @@
 #!/bin/bash
-# Import a memory export bundle into a project's graph.
-# Usage: import-memory.sh <bundle_file> [project_dir]
+# Import an EasyMem export bundle into a project's graph.
+# Usage: import-easymem.sh <bundle_file> [project_dir]
 #
 # Merges entities from the bundle, deduplicating by name+type.
 # Creates a backup before merging.
@@ -8,21 +8,21 @@
 # Validates imported entity structure.
 set -euo pipefail
 
-BUNDLE="${1:?Usage: import-memory.sh <bundle_file> [project_dir]}"
+BUNDLE="${1:?Usage: import-easymem.sh <bundle_file> [project_dir]}"
 PROJECT_DIR="${2:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd)" || {
     echo "ERROR: Directory not found: ${2:-.}"
     exit 1
 }
-MEMORY_DIR="${PROJECT_DIR}/.memory"
-GRAPH="${MEMORY_DIR}/graph.jsonl"
+EASYMEM_DIR="${PROJECT_DIR}/.easymem"
+GRAPH="${EASYMEM_DIR}/graph.jsonl"
 
 if [ ! -f "$BUNDLE" ]; then
     echo "ERROR: Bundle not found: ${BUNDLE}"
     exit 1
 fi
 
-if [ ! -d "$MEMORY_DIR" ]; then
+if [ ! -d "$EASYMEM_DIR" ]; then
     echo "ERROR: Project not initialized. Run setup-project.sh first."
     exit 1
 fi
@@ -51,8 +51,8 @@ with open(bundle_path, encoding='utf-8') as f:
     bundle = json.load(f)
 
 fmt = bundle.get('format', '')
-if fmt not in ('easy-memory-claude-export',):
-    print('ERROR: Not a valid easy-memory-claude export bundle')
+if fmt not in ('easymem-export',):
+    print('ERROR: Not a valid EasyMem export bundle')
     sys.exit(1)
 
 import_entries = bundle.get('entries', [])

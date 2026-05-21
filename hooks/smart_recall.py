@@ -6,15 +6,15 @@ Usage: python3 smart_recall.py <memory_dir>
 
 Progressive disclosure tiers:
   Tier 1 (SessionStart default): status line + entity names/types (~50 tokens)
-  Tier 2 (mem search --compact):  + scores + top observation (~200 tokens)
-  Tier 3 (mem search / mem recall): full observations + relations (~1000 tokens)
+  Tier 2 (easymem search --compact):  + scores + top observation (~200 tokens)
+  Tier 3 (easymem search / easymem recall): full observations + relations (~1000 tokens)
 
 Intelligence features:
   - Relevance gating: entities below MIN_SCORE are excluded
   - Token budgeting: output capped at configurable token budget
   - Stale decision nudge: pending decisions aged > threshold get flagged
   - Configurable recall style: minimal | balanced | detailed
-  - Session diff: tracks last session timestamp for mem diff
+  - Session diff: tracks last session timestamp for easymem diff
 """
 import json
 import math
@@ -39,37 +39,10 @@ _MAIN_BRANCHES = frozenset({
     "main", "master", "trunk", "develop",
 })
 
-# --- Defaults (overridable via .memory/config.json) ---
 _MIN_SCORE = 0.05
 _TOKEN_BUDGET = 300
 _RECALL_STYLE = "balanced"  # minimal | balanced | detailed
 _STALE_DECISION_DAYS = 7
-
-
-def _load_recall_config(memory_dir):
-    """Load recall settings from .memory/config.json."""
-    config_path = os.path.join(memory_dir, "config.json")
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return
-        global _MIN_SCORE, _TOKEN_BUDGET, _RECALL_STYLE
-        global _STALE_DECISION_DAYS
-        v = data.get("min_recall_score")
-        if isinstance(v, (int, float)) and 0 <= v <= 1:
-            _MIN_SCORE = v
-        v = data.get("recall_token_budget")
-        if isinstance(v, (int, float)) and 50 <= v <= 2000:
-            _TOKEN_BUDGET = int(v)
-        v = data.get("recall_style")
-        if v in ("minimal", "balanced", "detailed"):
-            _RECALL_STYLE = v
-        v = data.get("stale_decision_days")
-        if isinstance(v, (int, float)) and v >= 1:
-            _STALE_DECISION_DAYS = int(v)
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
 
 
 def _read_git_head(project_dir):
@@ -106,16 +79,16 @@ def _get_active_files(project_dir):
     """Get list of recently modified/active files via git status.
 
     Result is cached to /tmp for 60s to reduce SessionStart latency.
-    Gate behind CLAUDE_MEM_NO_GIT_STATUS=1 to skip entirely.
+    Gate behind CLAUDE_EASYMEM_NO_GIT_STATUS=1 to skip entirely.
     """
-    if os.environ.get("CLAUDE_MEM_NO_GIT_STATUS"):
+    if os.environ.get("CLAUDE_EASYMEM_NO_GIT_STATUS"):
         return set()
     import subprocess
     cache_key = "".join(
         c if c.isalnum() or c in ('_', '-') else '_'
         for c in project_dir
     )[:64]
-    cache_file = f"/tmp/.claude-mem-gitstatus-{cache_key}"
+    cache_file = f"/tmp/.claude-easymem-gitstatus-{cache_key}"
     try:
         age = time.time() - os.path.getmtime(cache_file)
         if 0 <= age < 60:
@@ -259,22 +232,16 @@ def _score_entity(info, now_ts, recall_counts, name,
     # Proactive Priming: boost if entity relates to active files
     if active_files:
         name_lower = name.lower()
-        is_active = False
-        for f in active_files:
-            if f in name_lower:
-                is_active = True
-                break
+        is_active = any(f in name_lower for f in active_files)
         if not is_active:
-            for o in obs:
+            # Cap obs scan: boost is binary, no need to inspect every obs.
+            for o in obs[:10]:
                 o_lower = o.lower()
-                for f in active_files:
-                    if f in o_lower:
-                        is_active = True
-                        break
-                if is_active:
+                if any(f in o_lower for f in active_files):
+                    is_active = True
                     break
         if is_active:
-            score *= 3.0  # Significant boost for active context
+            score *= 3.0
 
     return score
 
@@ -406,15 +373,29 @@ def _count_changes_since_last_session(entities, memory_dir):
 def main():
     if len(sys.argv) < 2:
         sys.exit(1)
+    # Compact mode: every token costs at compaction time.
+    compact = "--compact" in sys.argv
     memory_dir = sys.argv[1]
     if not os.path.isdir(memory_dir):
         print("Memory directory not found.")
         return
+    # Save+restore so an in-process re-invocation doesn't carry over
+    # compact-mode mutations into a subsequent non-compact call.
+    global _RECALL_STYLE, _TOKEN_BUDGET
+    _prev_style, _prev_budget = _RECALL_STYLE, _TOKEN_BUDGET
+    if compact:
+        _RECALL_STYLE = "minimal"
+        _TOKEN_BUDGET = 150
+    try:
+        _main_body(memory_dir, compact)
+    finally:
+        _RECALL_STYLE = _prev_style
+        _TOKEN_BUDGET = _prev_budget
+
+
+def _main_body(memory_dir, compact):
     project_dir = os.path.dirname(memory_dir)
     current_branch = _read_git_head(project_dir) or ""
-
-    # Load config overrides
-    _load_recall_config(memory_dir)
 
     entities, relations = _load_graph(memory_dir)
 
@@ -429,7 +410,7 @@ def main():
 
     if not entities:
         if relations:
-            print("Memory graph has relations but no entities.")
+            print("EasyMem graph has relations but no entities.")
         return
 
     recall_counts = _read_recall_counts(memory_dir)
@@ -481,7 +462,7 @@ def main():
 
     # Tier 1: Compact status line
     print(
-        f"Memory: {n_ent}e {n_rel}r "
+        f"EasyMem: {n_ent}e {n_rel}r "
         f"{n_dec}d {n_warn}w"
         + (f" | branch:{current_branch}"
            if current_branch else "")
@@ -496,10 +477,11 @@ def main():
 
     _print_compact_entities(scored, adj)
     _print_pending_decisions(entities, now_ts)
-    print(
-        f"Use `{os.path.expanduser('~')}/.claude/memory/mem search <query>` or "
-        f"`{os.path.expanduser('~')}/.claude/memory/mem recall <query>` for details."
-    )
+    if not compact:
+        print(
+            f"Use `{os.path.expanduser('~')}/.claude/easymem/easymem search <query>` or "
+            f"`{os.path.expanduser('~')}/.claude/easymem/easymem recall <query>` for details."
+        )
 
 
 if __name__ == "__main__":

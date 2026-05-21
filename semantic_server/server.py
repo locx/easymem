@@ -123,6 +123,8 @@ def _run_periodic_tasks(now_mono, memory_dir, idx_path):
         _last_evict_tick = now_mono
         _cache_mod.maybe_evict_caches()
 
+    # refresh_branch() in config.py has its own 60s monotonic gate;
+    # calling per tick is cheap when nothing has changed.
     branch, changed = refresh_branch()
     if changed:
         log_event("BRANCH_SWITCH", f"now on {branch}")
@@ -137,8 +139,8 @@ def main():
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     memory_dir = os.environ.get(
-        "MEMORY_DIR",
-        os.path.join(os.getcwd(), ".memory"),
+        "EASYMEM_DIR",
+        os.path.join(os.getcwd(), ".easymem"),
     )
 
     bootstrap(memory_dir, load_index_on_start=False)
@@ -155,6 +157,16 @@ def main():
     idx_path = os.path.join(
         memory_dir, "tfidf_index.json"
     )
+
+    # Seed the periodic timers so cold-start doesn't fire every task
+    # in the first tick (was: all zero-initialized at module load).
+    global _last_pending_check, _last_evict_tick
+    global _last_mtime_seen, _last_mtime_time
+    _now_init = time.monotonic()
+    _last_pending_check = _now_init
+    _last_evict_tick = _now_init
+    _last_mtime_time = _now_init
+    _cache_mod.last_index_check = _now_init
 
     buf = b""
     stdin_raw = sys.stdin.buffer

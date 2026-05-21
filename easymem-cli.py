@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI for the knowledge graph memory system.
 
-Usage: python3 memory-cli.py [--memory-dir DIR] <command> [args]
+Usage: python3 easymem-cli.py [--easymem-dir DIR] <command> [args]
 
 Commands: search, recall, write, decide, remove, status, doctor,
           rebuild, diff.
@@ -16,42 +16,40 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
-# P15: Honor NO_COLOR and TERM=dumb
 _USE_ANSI = (
     sys.stdout.isatty()
     and not os.environ.get("NO_COLOR")
     and os.environ.get("TERM", "") != "dumb"
 )
 
-# P7: read-only commands that skip bootstrap when memory_dir exists
-_READ_ONLY_CMDS = {"search", "recall", "status", "list", "diff", "doctor"}
+_READ_ONLY_CMDS = {"search", "recall", "status", "diff", "doctor"}
 
 
 def _resolve_memory_dir(argv):
-    """Extract memory_dir from --memory-dir flag (both = and space forms), env, or cwd."""
+    """Extract memory_dir from --easymem-dir flag (both = and space forms), env, or cwd."""
     md = None
     cleaned = []
     i = 0
     while i < len(argv):
-        if argv[i] == "--memory-dir" and i + 1 < len(argv):
+        if argv[i] == "--easymem-dir" and i + 1 < len(argv):
             md = argv[i + 1]
             i += 2
-        elif argv[i].startswith("--memory-dir="):
+        elif argv[i].startswith("--easymem-dir="):
             md = argv[i].split("=", 1)[1]
             i += 1
         else:
             cleaned.append(argv[i])
             i += 1
     if md is None:
-        md = os.environ.get("MEMORY_DIR")
+        md = os.environ.get("EASYMEM_DIR")
     if md is None:
-        md = os.path.join(os.getcwd(), ".memory")
+        md = os.path.join(os.getcwd(), ".easymem")
     return md, cleaned
 
 
 def _usage():
     print(
-        "Usage: mem [--memory-dir DIR] "
+        "Usage: easymem [--easymem-dir DIR] "
         "<command> [args]\n"
         "\nCommands:\n"
         "  search <query>          "
@@ -73,7 +71,7 @@ def _usage():
         "  diff                    "
         "Changes since last session\n"
         "\nFlags:\n"
-        "  --memory-dir DIR        "
+        "  --easymem-dir DIR        "
         "Override memory directory\n"
         "  --mode MODE             "
         "Search mode: semantic|temporal|graph\n"
@@ -121,7 +119,6 @@ def _parse_positional(args):
             try:
                 result["top_k"] = int(args[i])
             except ValueError:
-                # P16: warn on bad value
                 print(
                     f"Warning: --top-k requires an integer, got {args[i]!r}",
                     file=sys.stderr,
@@ -245,10 +242,10 @@ def _check_vector_layer(issues):
     import subprocess
     status = {}
     venv_py_file = os.path.expanduser(
-        "~/.claude/memory/.venv-python"
+        "~/.claude/easymem/.venv-python"
     )
     manifest_file = os.path.expanduser(
-        "~/.claude/memory/.install-manifest"
+        "~/.claude/easymem/.install-manifest"
     )
 
     if not os.path.exists(venv_py_file):
@@ -263,10 +260,14 @@ def _check_vector_layer(issues):
             issues.append(f"venv python missing at {venv_py}")
             status["venv"] = "missing"
         else:
-            rc = subprocess.run(
-                [venv_py, "-c", "import model2vec"],
-                capture_output=True,
-            ).returncode
+            try:
+                rc = subprocess.run(
+                    [venv_py, "-c", "import model2vec"],
+                    capture_output=True, timeout=10,
+                ).returncode
+            except subprocess.TimeoutExpired:
+                rc = -1
+                issues.append("model2vec import probe timed out")
             if rc != 0:
                 issues.append("model2vec import failed in venv")
                 status["venv"] = "import_failed"
@@ -303,6 +304,29 @@ def _check_vector_layer(issues):
     return status
 
 
+def _load_contradictions(memory_dir, issues):
+    """Read contradictions sidecar written by maintenance."""
+    empty = {"count": 0, "entities": 0, "samples": []}
+    path = os.path.join(memory_dir, "contradictions.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return empty
+    if not isinstance(data, dict) or not data:
+        return empty
+    n_pairs = sum(len(v) for v in data.values() if isinstance(v, list))
+    samples = [f"{n} (pairs={len(p)})"
+               for n, p in list(data.items())[:3]
+               if isinstance(p, list) and p]
+    noun = "entity" if len(data) == 1 else "entities"
+    issues.append(
+        f"Possible contradictions: {n_pairs} pair(s) "
+        f"across {len(data)} {noun}"
+    )
+    return {"count": n_pairs, "entities": len(data), "samples": samples}
+
+
 def _run_doctor(memory_dir):
     """Health check for the knowledge graph."""
     from collections import Counter
@@ -326,11 +350,11 @@ def _run_doctor(memory_dir):
             if idx_age_h > 24:
                 issues.append(
                     f"Stale index: {idx_age_h:.0f}h old "
-                    f"(run: mem rebuild)"
+                    f"(run: easymem rebuild)"
                 )
         elif entities:
             issues.append(
-                "No TF-IDF index found (run: mem rebuild)"
+                "No TF-IDF index found (run: easymem rebuild)"
             )
 
         type_counts = Counter(
@@ -344,6 +368,7 @@ def _run_doctor(memory_dir):
         issues.append("No graph.jsonl found")
 
     vector = _check_vector_layer(issues)
+    contradictions = _load_contradictions(memory_dir, issues)
 
     status = "healthy" if not issues else "issues_found"
     result = {
@@ -356,31 +381,46 @@ def _run_doctor(memory_dir):
             ),
         },
         "vector_layer": vector,
+        "contradictions": contradictions,
         "issues": issues,
         "issue_count": len(issues),
     }
 
     if _USE_ANSI:
-        print(f"\n\033[1mMemory Doctor\033[0m — {status}")
-        g = result["graph"]
-        print(
-            f"  Graph: {g['entities']}e "
-            f"{g['relations']}r"
-        )
-        print(
-            f"  Vector: venv={vector['venv']} "
-            f"model={vector['manifest']} "
-            f"cache={vector['model_cache']}"
-        )
-        if issues:
-            print(f"\n  Issues ({len(issues)}):")
-            for issue in issues:
-                print(f"    \033[33m!\033[0m {issue}")
-        else:
-            print("  \033[32mNo issues found\033[0m")
-        print()
+        _print_doctor_ansi(result)
     else:
         print(json.dumps(result, indent=2))
+
+
+def _print_doctor_ansi(result):
+    """ANSI-rendered doctor summary."""
+    g = result["graph"]
+    vector = result["vector_layer"]
+    contradictions = result["contradictions"]
+    issues = result["issues"]
+    print(f"\n\033[1mEasyMem Doctor\033[0m — {result['status']}")
+    print(f"  Graph: {g['entities']}e {g['relations']}r")
+    print(
+        f"  Vector: venv={vector['venv']} "
+        f"model={vector['manifest']} "
+        f"cache={vector['model_cache']}"
+    )
+    if contradictions["count"]:
+        noun = ("entity" if contradictions["entities"] == 1
+                else "entities")
+        print(
+            f"  Contradictions: {contradictions['count']} "
+            f"pair(s) across {contradictions['entities']} {noun}"
+        )
+        for s in contradictions["samples"]:
+            print(f"    - {s}")
+    if issues:
+        print(f"\n  Issues ({len(issues)}):")
+        for issue in issues:
+            print(f"    \033[33m!\033[0m {issue}")
+    else:
+        print("  \033[32mNo issues found\033[0m")
+    print()
 
 
 # --- Unified tool handlers ---
@@ -547,7 +587,7 @@ def _unified_remove(a, memory_dir):
             a.get("entity", ""), a.get("observations", []),
             memory_dir,
         )
-    # P10: require explicit action: "delete"
+    # Require explicit "delete" action — silent removal is too dangerous.
     if action != "delete":
         return {"error": "missing action"}
     names = (
@@ -588,9 +628,9 @@ def _run_diff(memory_dir):
         last_ts = None
 
     if not last_ts:
-        mem = os.path.expanduser("~/.claude/memory/mem")
+        em = os.path.expanduser("~/.claude/easymem/easymem")
         print("No previous session recorded. "
-              f"Run `{mem} status` in a new session first.")
+              f"Run `{em} status` in a new session first.")
         return
 
     graph_path = os.path.join(memory_dir, "graph.jsonl")
@@ -619,11 +659,6 @@ def _run_diff(memory_dir):
                         if new_u and (not prev.get("_updated")
                                       or new_u > prev["_updated"]):
                             prev["_updated"] = new_u
-                        for o in obj.get("observations", []):
-                            if isinstance(o, str):
-                                prev.setdefault(
-                                    "observations", []
-                                ).append(o)
                     else:
                         entities[name] = dict(obj)
                 except (json.JSONDecodeError, ValueError):
@@ -818,15 +853,12 @@ def main():
 
     tool_args = _parse_tool_args(tool_name, extra_args)
 
-    # P7: skip bootstrap for read-only commands when dir exists
-    if tool_name in _READ_ONLY_CMDS and os.path.isdir(memory_dir):
-        pass
-    else:
+    if not (tool_name in _READ_ONLY_CMDS and os.path.isdir(memory_dir)):
         was_missing = not os.path.isdir(memory_dir)
         from semantic_server.bootstrap import bootstrap
         if not bootstrap(memory_dir, load_index_on_start=False):
             print(
-                f"Error: Could not initialize MEMORY_DIR {memory_dir}",
+                f"Error: Could not initialize EASYMEM_DIR {memory_dir}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -842,7 +874,7 @@ def main():
     # --- Commands that don't need semantic_server ---
     if tool_name == "rebuild":
         import maintenance
-        # P2: mark dirty and defer; --rebuild-now for immediate
+        # Mark dirty and defer; --rebuild-now forces immediate.
         if "--rebuild-now" in extra_args:
             indexed = maintenance.rebuild_index(memory_dir)
             print(json.dumps({
@@ -915,7 +947,7 @@ def main():
     else:
         print(json.dumps(result, indent=2))
 
-    # P2: mark index dirty after write ops; skip synchronous rebuild
+    # Mark dirty after write ops; rebuild deferred to next maintenance.
     if tool_name in ("write", "decide", "remove"):
         dirty = os.path.join(memory_dir, ".index-dirty")
         try:

@@ -45,17 +45,6 @@ def _build_norm_index(existing_entities):
     return index
 
 
-def _find_similar_entity(name, norm_index):
-    """O(1) fuzzy lookup against pre-computed normalized index."""
-    norm = normalize_name(name)
-    if not norm or len(norm) < 3:
-        return None
-    existing = norm_index.get(norm)
-    if existing and existing != name:
-        return existing
-    return None
-
-
 def _validate_list_arg(val, max_n, label):
     """Validate that val is a list within max_n length; return (list, error_dict)."""
     if not isinstance(val, list):
@@ -225,55 +214,6 @@ def create_relations(relations_input, memory_dir):
     return {"created": len(new_entries)}
 
 
-_NEG_WORDS = frozenset({
-    "not", "no", "never", "dont", "doesnt",
-    "removed", "deprecated", "reverted",
-    "disabled", "dropped", "replaced",
-    "incorrect", "wrong", "broken",
-    "cannot", "cant", "wont", "without",
-    "fails", "failing",
-})
-
-
-def _detect_contradictions(new_obs, existing_obs,
-                           enable_contradictions=False):
-    if not enable_contradictions:
-        return []
-    conflicts = []
-    for new_o in new_obs:
-        new_lower = set(new_o.lower().split())
-        new_has_neg = bool(new_lower & _NEG_WORDS)
-        for exist_o in existing_obs:
-            if not isinstance(exist_o, str):
-                continue
-            exist_lower = set(exist_o.lower().split())
-            exist_has_neg = bool(exist_lower & _NEG_WORDS)
-            if new_has_neg != exist_has_neg:
-                shared = (new_lower & exist_lower) - {
-                    "the", "a", "is", "are", "was", "to",
-                    "in", "for", "and", "of", "it",
-                    "this", "that", "with",
-                }
-                if len(shared) >= 3:
-                    conflicts.append({
-                        "new": new_o[:100],
-                        "existing": exist_o[:100],
-                    })
-            if len(conflicts) >= 3:
-                break
-        if len(conflicts) >= 3:
-            break
-    return conflicts
-
-
-def _apply_observations(entity_name, new_obs, cur_obs_keys):
-    """Filter new_obs against existing dedup keys; return filtered list."""
-    return [
-        o for o in new_obs
-        if _obs_dedup_key(o) not in cur_obs_keys
-    ]
-
-
 def add_observations(entity_name, observations, memory_dir,
                      _retry=False):
     """Add observations to an existing entity.
@@ -322,9 +262,10 @@ def add_observations(entity_name, observations, memory_dir,
         _obs_dedup_key(o)
         for o in info.get("observations", [])
     }
-    new_obs = _apply_observations(
-        entity_name, new_obs, cur_obs_keys
-    )
+    new_obs = [
+        o for o in new_obs
+        if _obs_dedup_key(o) not in cur_obs_keys
+    ]
     if not new_obs:
         return {
             "added": 0,
@@ -333,9 +274,6 @@ def add_observations(entity_name, observations, memory_dir,
         }
     etype = info.get("entityType", "")
     created = info.get("_created", now)
-    conflicts = _detect_contradictions(
-        new_obs, info.get("observations", [])
-    )
 
     try:
         post_mtime = os.path.getmtime(graph_path)
@@ -377,14 +315,7 @@ def add_observations(entity_name, observations, memory_dir,
         "ADD_OBS",
         f'entity="{entity_name}" added={total}',
     )
-    result = {"added": total}
-    if conflicts:
-        result["conflicts"] = conflicts
-        result["warning"] = (
-            f"{len(conflicts)} potential "
-            f"contradiction(s) detected"
-        )
-    return result
+    return {"added": total}
 
 
 def delete_entities(entity_names, memory_dir,
@@ -499,10 +430,7 @@ def _build_decision_obs(args):
         outcome = "pending"
         warnings.append("invalid outcome coerced to pending")
     obs.append(f"Outcome: {outcome}")
-    result = (obs, outcome)
-    if warnings:
-        return obs, outcome, warnings
-    return obs, outcome, []
+    return obs, outcome, warnings
 
 
 def create_decision(args, memory_dir):
@@ -655,11 +583,6 @@ def _file_kb(path):
         return os.path.getsize(path) // 1024
     except OSError:
         return 0
-
-
-def _file_info(path):
-    """Return (mtime_iso, size_kb) or (None, 0)."""
-    return _file_iso(path), _file_kb(path)
 
 
 def _stats_counts(entities, relations):

@@ -38,6 +38,7 @@ def clear_entity_cache():
         offset=0, append_only=False,
     )
     entity_cache.pop("_pre_invalidate_mtime", None)
+    entity_cache.pop("obs_keys_size", None)
 
 
 def clear_relation_cache():
@@ -77,9 +78,24 @@ def estimate_size(obj, _depth=0):
     return getsizeof(obj)
 
 
+def _obs_keys_size():
+    # Memoize: estimate_size walks every dedup-key tuple, ~O(N·M).
+    # Bust by setting entity_cache["obs_keys_size"] = None on mutation.
+    cached = entity_cache.get("obs_keys_size")
+    if cached is not None:
+        return cached
+    obs_keys = entity_cache.get("obs_keys") or {}
+    size = estimate_size(obs_keys) if obs_keys else 0
+    entity_cache["obs_keys_size"] = size
+    return size
+
+
 def _cache_total():
+    # obs_keys is a sidecar dedup set hung off entity_cache; its bytes
+    # are real RAM but were missing from the eviction trigger.
     return (index_cache["size"] + entity_cache["size"]
-            + relation_cache["size"] + adjacency_cache["size"])
+            + relation_cache["size"] + adjacency_cache["size"]
+            + _obs_keys_size())
 
 
 def maybe_evict_caches():
@@ -95,7 +111,14 @@ def maybe_evict_caches():
         (entity_cache, clear_entity_cache),
         (relation_cache, clear_relation_cache),
     ]
-    evictable.sort(key=lambda x: x[0]["size"], reverse=True)
+    # entity_cache effective size includes obs_keys sidecar.
+    evictable.sort(
+        key=lambda x: (
+            x[0]["size"]
+            + (_obs_keys_size() if x[0] is entity_cache else 0)
+        ),
+        reverse=True,
+    )
     for cache, clear_fn in evictable:
         if cache["size"] > 0:
             clear_fn()

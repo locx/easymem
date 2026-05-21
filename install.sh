@@ -1,247 +1,199 @@
 #!/bin/bash
-# Claude Memory Infrastructure — Installer
-# Deploys runtime tools to ~/.claude/memory/ and hooks to ~/.claude/hooks/.
-# Run from the easy-memory-claude project directory.
-# Requirements: python3 3.10+, git | Platform: macOS / Linux
+# EasyMem Infrastructure — Installer
+# Deploys runtime to ~/.claude/easymem/ and hooks to ~/.claude/hooks/.
+# Run from the easymem project directory.
+# Flags: --no-vector  --no-hooks  --minimal (both)
 set -euo pipefail
+
+VECTOR_INSTALL=1
+WIRE_HOOKS=1
+
+usage() {
+    cat <<EOF
+Usage: install.sh [--no-vector] [--no-hooks] [--minimal]
+
+Default: installs everything (vector retrieval + hooks). Flags opt out.
+EOF
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-vector) VECTOR_INSTALL=0 ;;
+        --no-hooks)  WIRE_HOOKS=0 ;;
+        --minimal)   VECTOR_INSTALL=0; WIRE_HOOKS=0 ;;
+        --help|-h)   usage ;;
+        *) echo "Unknown argument: $1" >&2; usage ;;
+    esac
+    shift
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${HOME}/.claude"
-MEMORY_DIR="${CLAUDE_HOME}/memory"
+EASYMEM_DIR="${CLAUDE_HOME}/easymem"
 HOOKS_DIR="${CLAUDE_HOME}/hooks"
 SETTINGS="${CLAUDE_HOME}/settings.json"
 
-echo "=== Claude Memory Infrastructure Installer ==="
+echo "=== EasyMem Infrastructure Installer ==="
 echo "  Source: ${SCRIPT_DIR}"
+echo "  Vector: $([ $VECTOR_INSTALL -eq 1 ] && echo ON || echo OFF)"
+echo "  Hooks:  $([ $WIRE_HOOKS -eq 1 ] && echo ON || echo OFF)"
 echo ""
 
-# --- Step 1: Preflight checks (python3, git, version) ---
-echo "[1/5] Preflight checks..."
+# --- Step 1: Preflight (python3 3.10+, git) ---
+echo "[1/5] Preflight..."
 
 check_cmd() {
-    if ! command -v "$1" &>/dev/null; then
-        echo "  ERROR: $1 not found. Install it first."
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "  ERROR: $1 not found. Install it first." >&2
         exit 1
-    fi
+    }
     echo "  [ok] $1"
 }
-
 check_cmd python3
 check_cmd git
 
-PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
-    echo "  ERROR: Python 3.10+ required, found $PY_VER"
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
+    echo "  ERROR: Python 3.10+ required" >&2
     exit 1
-fi
-echo "  [ok] Python $PY_VER"
+}
+echo "  [ok] Python 3.10+"
 echo ""
 
-# --- Step 2: Create ~/.claude/memory/ and ~/.claude/hooks/ ---
+# --- Step 2: Create install directories ---
 echo "[2/5] Creating directories..."
-mkdir -p "${MEMORY_DIR}" "${HOOKS_DIR}"
-echo "  [ok] ${MEMORY_DIR}/"
+mkdir -p "${EASYMEM_DIR}" "${HOOKS_DIR}"
+echo "  [ok] ${EASYMEM_DIR}/"
 echo "  [ok] ${HOOKS_DIR}/"
 echo ""
 
-# --- Step 3: Deploy runtime scripts to ~/.claude/memory/ ---
-echo "[3/5] Deploying runtime scripts..."
+# --- Step 3: Deploy runtime to ~/.claude/easymem/ ---
+echo "[3/5] Deploying runtime..."
 
-# Verify source files exist
-for src in maintenance.py semantic_server/__init__.py semantic_server/maintenance_utils.py; do
-    if [ ! -f "${SCRIPT_DIR}/${src}" ]; then
-        echo "  ERROR: ${SCRIPT_DIR}/${src} not found."
-        echo "         Run this installer from the easy-memory-claude project directory."
-        exit 1
-    fi
+# Clean copy avoids stale __pycache__ binding to a prior tree layout.
+rm -rf "${EASYMEM_DIR}/semantic_server"
+cp -r "${SCRIPT_DIR}/semantic_server" "${EASYMEM_DIR}/semantic_server"
+find "${EASYMEM_DIR}/semantic_server" -name '__pycache__' -type d \
+    -exec rm -rf {} + 2>/dev/null || true
+echo "  [ok] semantic_server/"
+
+for f in maintenance.py easymem-cli.py easymem; do
+    cp "${SCRIPT_DIR}/${f}" "${EASYMEM_DIR}/${f}"
+    chmod +x "${EASYMEM_DIR}/${f}"
+    echo "  [ok] ${f}"
 done
 
-# Deploy maintenance.py
-cp "${SCRIPT_DIR}/maintenance.py" "${MEMORY_DIR}/maintenance.py"
-chmod +x "${MEMORY_DIR}/maintenance.py"
-echo "  [ok] maintenance.py → ${MEMORY_DIR}/"
+printf '%s' "${SCRIPT_DIR}" > "${EASYMEM_DIR}/.source-dir"
+echo ""
 
-# Deploy semantic_server package (clean copy)
-rm -rf "${MEMORY_DIR}/semantic_server"
-cp -r "${SCRIPT_DIR}/semantic_server" "${MEMORY_DIR}/semantic_server"
-find "${MEMORY_DIR}/semantic_server" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-echo "  [ok] semantic_server/ → ${MEMORY_DIR}/"
+# --- Step 4: Vector retrieval venv + model ---
+if [ $VECTOR_INSTALL -eq 1 ]; then
+    echo "[4/5] Setting up vector retrieval..."
+    VENV_DIR="${EASYMEM_DIR}/venv"
+    VENV_PY="${VENV_DIR}/bin/python3"
 
-# Deploy backwards-compatible entry point shim
-cp "${SCRIPT_DIR}/semantic_server.py" "${MEMORY_DIR}/semantic_server.py"
-chmod +x "${MEMORY_DIR}/semantic_server.py"
-echo "  [ok] semantic_server.py (compat shim) → ${MEMORY_DIR}/"
-printf '%s' "${SCRIPT_DIR}" > "${MEMORY_DIR}/.source-dir"
-echo "  [ok] .source-dir → ${MEMORY_DIR}/"
+    if [ ! -x "$VENV_PY" ]; then
+        python3 -m venv "$VENV_DIR"
+        echo "  [ok] venv at ${VENV_DIR}"
+    else
+        echo "  [skip] venv already exists"
+    fi
 
-# Deploy CLI bridge for VSCode fallback
-cp "${SCRIPT_DIR}/memory-cli.py" "${MEMORY_DIR}/memory-cli.py"
-chmod +x "${MEMORY_DIR}/memory-cli.py"
-echo "  [ok] memory-cli.py (CLI bridge) → ${MEMORY_DIR}/"
-
-# Deploy 'mem' CLI wrapper
-cp "${SCRIPT_DIR}/mem" "${MEMORY_DIR}/mem"
-chmod +x "${MEMORY_DIR}/mem"
-echo "  [ok] mem (CLI wrapper) → ${MEMORY_DIR}/"
-
-# --- Step 3b: Set up venv + install model2vec + pre-download model ---
-echo "[3b/5] Setting up vector retrieval venv..."
-
-VENV_DIR="${MEMORY_DIR}/venv"
-VENV_PY="${VENV_DIR}/bin/python3"
-VENV_PY_FILE="${MEMORY_DIR}/.venv-python"
-MANIFEST="${MEMORY_DIR}/.install-manifest"
-
-if [ ! -x "$VENV_PY" ]; then
-    python3 -m venv "$VENV_DIR" || {
-        echo "  ERROR: failed to create venv at $VENV_DIR"
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install --quiet -r "${SCRIPT_DIR}/requirements.txt" || {
+        echo "  ERROR: pip install failed; re-run install.sh to retry" >&2
         exit 1
     }
-    echo "  [ok] venv at $VENV_DIR"
-else
-    echo "  [skip] venv already exists"
-fi
+    echo "  [ok] requirements.txt installed"
 
-"$VENV_PY" -m pip install --quiet --upgrade pip
-"$VENV_PY" -m pip install --quiet model2vec numpy orjson || {
-    echo "  ERROR: pip install failed in venv"
-    echo "  Retry: re-run install.sh"
-    exit 1
-}
-echo "  [ok] model2vec + numpy + orjson installed in venv"
-
-echo "  Pre-downloading model (one-time, ~32MB)..."
-"$VENV_PY" -c "
+    # One interpreter spawn: preload model AND read SHA for the manifest.
+    # HF cache is content-addressed, so a partial download won't poison retry.
+    MODEL_REV=$("$VENV_PY" -c '
 from model2vec import StaticModel
-m = StaticModel.from_pretrained('minishlab/potion-retrieval-32M')
-print(f'  [ok] model loaded, dim={m.dim}')
-" || {
-    echo "  ERROR: model download failed."
-    echo "  Retry: re-run install.sh (HF cache is content-addressed,"
-    echo "  partial files do not poison a re-run)."
-    exit 1
-}
-
-# Write .venv-python sidecar (hooks read this to discover the interpreter)
-printf '%s\n' "$VENV_PY" > "$VENV_PY_FILE"
-echo "  [ok] $VENV_PY_FILE"
-
-# Write .install-manifest
-MODEL_REV=$("$VENV_PY" -c "
 from huggingface_hub import HfApi
-info = HfApi().model_info('minishlab/potion-retrieval-32M')
-print(info.sha or '')
-" 2>/dev/null || echo "")
-NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cat > "$MANIFEST" << MANIFEOF
-{
-  "model": "minishlab/potion-retrieval-32M",
-  "model_rev": "${MODEL_REV}",
-  "venv": "${VENV_DIR}",
-  "installed_at": "${NOW}"
-}
-MANIFEOF
-echo "  [ok] $MANIFEST"
-echo ""
-
-# --- Step 4: Deploy hook scripts to ~/.claude/hooks/ ---
-echo "[4/5] Deploying global hooks..."
-
-HOOK_SRC="${SCRIPT_DIR}/hooks"
-for hook in prime-memory.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py; do
-    if [ ! -f "${HOOK_SRC}/${hook}" ]; then
-        echo "  ERROR: ${HOOK_SRC}/${hook} not found."
-        echo "         Run this installer from the easy-memory-claude project directory."
+StaticModel.from_pretrained("minishlab/potion-retrieval-32M")
+try:
+    print(HfApi().model_info("minishlab/potion-retrieval-32M").sha or "")
+except Exception:
+    print("")
+' 2>/dev/null) || {
+        echo "  ERROR: model preload failed; re-run install.sh to retry" >&2
         exit 1
-    fi
-    cp "${HOOK_SRC}/${hook}" "${HOOKS_DIR}/${hook}"
-    chmod +x "${HOOKS_DIR}/${hook}"
-    echo "  [ok] ${hook} → ${HOOKS_DIR}/"
-done
-echo ""
+    }
 
-# --- Step 5: Wire hooks into settings.json ---
-echo "[5/5] Configuring hooks in settings.json..."
+    printf '%s\n' "$VENV_PY" > "${EASYMEM_DIR}/.venv-python"
 
-if [ ! -f "${SETTINGS}" ]; then
-    # Create fresh settings with all memory hooks
-    cat > "${SETTINGS}" << 'SETEOF'
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/prime-memory.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/nudge-setup.sh",
-            "timeout": 3
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/capture-tool-context.sh",
-            "timeout": 3
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/capture-decisions.sh",
-            "timeout": 3
-          }
-        ]
-      }
-    ]
-  }
+    MODEL_REV="$MODEL_REV" VENV_DIR="$VENV_DIR" \
+        MANIFEST="${EASYMEM_DIR}/.install-manifest" python3 - <<'PYEOF'
+import json, os, time
+data = {
+    "model": "minishlab/potion-retrieval-32M",
+    "model_rev": os.environ["MODEL_REV"],
+    "venv": os.environ["VENV_DIR"],
+    "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }
-SETEOF
-    echo "  [ok] Created ${SETTINGS} with hooks"
+with open(os.environ["MANIFEST"], "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+    echo "  [ok] model + manifest"
+    echo ""
 else
-    # Merge memory hooks into existing settings (idempotent)
-    python3 "${SCRIPT_DIR}/scripts/_hook_merge.py" --mode add --settings "${SETTINGS}" \
-        --event SessionStart --hook-file '$HOME/.claude/hooks/prime-memory.sh' --timeout 10
-    python3 "${SCRIPT_DIR}/scripts/_hook_merge.py" --mode add --settings "${SETTINGS}" \
-        --event SessionStart --hook-file '$HOME/.claude/hooks/nudge-setup.sh' --timeout 3
-    python3 "${SCRIPT_DIR}/scripts/_hook_merge.py" --mode add --settings "${SETTINGS}" \
-        --event PostToolUse --hook-file '$HOME/.claude/hooks/capture-tool-context.sh' --timeout 3
-    python3 "${SCRIPT_DIR}/scripts/_hook_merge.py" --mode add --settings "${SETTINGS}" \
-        --event Stop --hook-file '$HOME/.claude/hooks/capture-decisions.sh' --timeout 3
+    echo "[4/5] [skip] vector retrieval (--no-vector)"
+    echo "  Hybrid search disabled — TF-IDF only."
+    echo ""
 fi
 
-echo ""
-echo "============================================================"
-echo "  Installation complete!"
-echo ""
-echo "  Runtime:       ~/.claude/memory/ (5 files + semantic_server package)"
-echo "  Hooks:         ~/.claude/hooks/  (4 shell + 2 Python)"
-echo "  Settings:      ~/.claude/settings.json"
-echo "  Dev/source:    ${SCRIPT_DIR}/"
-echo ""
-echo "  To use the 'mem' command globally:"
-echo "    export PATH=\"\$HOME/.claude/memory:\$PATH\""
-echo "    (Add this to your ~/.bashrc or ~/.zshrc)"
-echo ""
-echo "  To set up a project:"
-echo "    ${SCRIPT_DIR}/setup-project.sh /path/to/project"
-echo ""
-echo "  Then restart Claude Code to activate hooks."
-echo "============================================================"
+# --- Step 5: Deploy hooks + wire settings.json ---
+echo "[5/5] Deploying hooks..."
+
+HOOKS=(prime-easymem.sh prime-on-compact.sh capture-decisions.sh
+       nudge-setup.sh capture-tool-context.sh
+       capture_tool_context.py smart_recall.py)
+for h in "${HOOKS[@]}"; do
+    cp "${SCRIPT_DIR}/hooks/${h}" "${HOOKS_DIR}/${h}"
+done
+chmod +x "${HOOKS_DIR}"/*.sh "${HOOKS_DIR}"/*.py
+echo "  [ok] ${#HOOKS[@]} hooks → ${HOOKS_DIR}/"
+
+if [ $WIRE_HOOKS -eq 1 ]; then
+    # _hook_merge.py handles missing settings.json by starting from {}.
+    # Format: "<event> <hook-basename> <timeout>"
+    HOOK_WIRING=(
+        "SessionStart prime-easymem.sh 10"
+        "SessionStart nudge-setup.sh 3"
+        "PostToolUse capture-tool-context.sh 3"
+        "Stop capture-decisions.sh 3"
+        "PreCompact prime-on-compact.sh 5"
+    )
+    for spec in "${HOOK_WIRING[@]}"; do
+        # shellcheck disable=SC2086
+        set -- $spec
+        python3 "${SCRIPT_DIR}/scripts/_hook_merge.py" --mode add \
+            --settings "${SETTINGS}" --event "$1" \
+            --hook-file "\$HOME/.claude/hooks/$2" --timeout "$3"
+    done
+    echo "  [ok] wired in ${SETTINGS}"
+else
+    echo "  [skip] hook wiring (--no-hooks)"
+    echo "  Hooks deployed but not wired. Re-run without --no-hooks."
+fi
+
+cat <<EOF
+
+============================================================
+Installation complete.
+
+  Runtime:   ${EASYMEM_DIR}/
+  Hooks:     ${HOOKS_DIR}/
+  Settings:  ${SETTINGS}
+
+To use 'easymem' globally:
+    export PATH="\$HOME/.claude/easymem:\$PATH"
+
+To set up a project:
+    ${SCRIPT_DIR}/setup-project.sh /path/to/project
+
+Restart Claude Code to activate hooks.
+============================================================
+EOF

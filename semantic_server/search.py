@@ -13,6 +13,7 @@ from .config import (
     MAX_QUERY_CHARS,
     MAX_TOP_K,
     RE_WORDS,
+    RRF_K,
     get_current_branch,
     log_event,
     normalize_iso_ts as _normalize_iso_ts,
@@ -24,22 +25,15 @@ from .recall import (
     maybe_reload_recall_counts, record_recalls, recall_counts,
 )
 
-# Import search-quality enhancers from modular components
-try:
-    from .stem import stem_word as _stem
-    from .text import (
-        expand_synonyms as _expand_synonyms,
-        make_bigrams as _make_bigrams,
-        STOPWORDS as _STOPWORDS,
-        filter_token as _filter_token,
-        load_aliases,
-        normalize_type,
-    )
-    _HAS_STEMMING = True
-except ImportError as _import_err:
-    raise ImportError(
-        f"[memory] stem/text modules required but unavailable: {_import_err}"
-    )
+from .stem import stem_word as _stem
+from .text import (
+    expand_synonyms as _expand_synonyms,
+    make_bigrams as _make_bigrams,
+    STOPWORDS as _STOPWORDS,
+    filter_token as _filter_token,
+    load_aliases,
+    normalize_type,
+)
 
 MIN_SIM_THRESHOLD = 0.001
 _HEBBIAN_ALPHA = 0.1
@@ -192,9 +186,8 @@ def _format_results(results, compact, metadata, memory_dir):
             )
 
 
-def _tfidf_search_impl(query, memory_dir, top_k, current_branch):
-    """TF-IDF cosine search. Same return shape as legacy search()."""
-    idx = load_index(memory_dir)
+def _tfidf_search_impl(query, memory_dir, top_k, current_branch, idx):
+    """TF-IDF cosine search; idx None means no index built yet."""
     if idx is None:
         return {"error": "No TF-IDF index found. Ensure SessionStart ran.",
                 "results": [], "total_indexed": 0}
@@ -225,21 +218,29 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False):
     except (ValueError, TypeError):
         top_k = 5
     current_branch = branch or get_current_branch()
+    # Whitespace-only queries can't usefully match anything; skip the
+    # full pipeline so neither TF-IDF nor vector pays cost.
+    if not query.strip():
+        return {"results": [], "total_indexed": 0,
+                "current_branch": current_branch}
     maybe_reload_recall_counts()
 
+    # One index read per call — _tfidf_search_impl reuses, phantom-filter reuses.
+    idx = load_index(memory_dir)
     tfidf_out = _tfidf_search_impl(
-        query, memory_dir, top_k * 4, current_branch,
+        query, memory_dir, top_k * 4, current_branch, idx,
     )
     try:
         from .vector import vector_search
-        vec_results = vector_search(memory_dir, query, top_k=top_k * 4)
+        vec_results = vector_search(
+            memory_dir, query, top_k=top_k * 4,
+        )
     except Exception as exc:
         sys.stderr.write(
             f"[search] vector path failed: {exc} - TF-IDF only\n"
         )
         vec_results = []
 
-    from .config import RRF_K
     scores: dict[str, float] = {}
     for rank, r in enumerate(tfidf_out.get("results", [])):
         scores[r["entity"]] = (
@@ -249,8 +250,7 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False):
         scores[name] = scores.get(name, 0.0) + 1.0 / (RRF_K + rank)
 
     current_entities = load_graph_entities(memory_dir)
-    idx = load_index(memory_dir) or {}
-    metadata = idx.get("metadata", {})
+    metadata = (idx or {}).get("metadata", {})
 
     fused = []
     for name, rrf in scores.items():

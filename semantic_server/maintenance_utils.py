@@ -4,11 +4,13 @@ Extracted from maintenance.py to reduce bloat.
 """
 import json
 import math
+import re
 import sys
 import time
 import os
 from datetime import datetime, timedelta, timezone
-from .text import normalize_name, normalize_type
+from .text import normalize_name, normalize_type, filter_token
+from .stem import stem_word
 
 # Configuration defaults (mirrored or passed from maintenance)
 _GUARD_AGE_DAYS = 7
@@ -282,6 +284,95 @@ def consolidate(entities, relations, min_merge_name_len=4):
     updated_rels = _rewrite_relations_post_merge(relations, renames)
 
     return kept, updated_rels, merged_count
+
+
+# Lexical cues that flag architectural reversal or boolean negation.
+# Multi-word phrases must precede their tokens to win regex alternation.
+_CONTRADICTION_CUES = (
+    "superseded by", "replaced by", "replaced with",
+    "switched to", "migrated to", "moved to", "renamed to",
+    "no longer", "instead of", "rather than",
+    "removed", "deprecated", "supersedes", "obsolete",
+    "abandoned", "dropped", "reverted",
+    "broken", "fails", "buggy", "rejected",
+    "previously", "originally",
+    "not", "doesn't", "don't", "won't", "can't",
+    "isn't", "wasn't",
+)
+_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(c) for c in _CONTRADICTION_CUES)
+    + r")\b",
+    re.IGNORECASE,
+)
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+_MIN_SHARED_STEMS = 3
+_MIN_JACCARD = 0.3
+_MAX_OBS_PER_ENTITY = 20
+
+
+def _obs_stems(obs: str) -> set:
+    return {stem_word(w) for w in _WORD_RE.findall(obs.lower())
+            if filter_token(w)}
+
+
+def detect_contradictions(entities_iter):
+    """Flag obs pairs with asymmetric negation cue + lexical overlap.
+
+    Advisory only; never mutates the graph.
+    """
+    findings = {}
+    for ent in entities_iter:
+        obs = [o for o in ent.get("observations", [])
+               if isinstance(o, str)]
+        if len(obs) < 2:
+            continue
+        if len(obs) > _MAX_OBS_PER_ENTITY:
+            obs = obs[-_MAX_OBS_PER_ENTITY:]
+        stems = [_obs_stems(o) for o in obs]
+        cues = [bool(_CUE_RE.search(o)) for o in obs]
+        n = len(obs)
+        pairs = []
+        for i in range(n):
+            if not stems[i]:
+                continue
+            for j in range(i + 1, n):
+                if cues[i] == cues[j] or not stems[j]:
+                    continue
+                shared = stems[i] & stems[j]
+                if len(shared) < _MIN_SHARED_STEMS:
+                    continue
+                union = stems[i] | stems[j]
+                jaccard = len(shared) / len(union)
+                if jaccard < _MIN_JACCARD:
+                    continue
+                pairs.append([i, j, round(jaccard, 2)])
+        if pairs:
+            findings[ent.get("name", "")] = pairs
+    return findings
+
+
+def write_contradictions_sidecar(memory_dir: str, findings: dict) -> None:
+    """Atomic write or clear of .easymem/contradictions.json."""
+    path = os.path.join(memory_dir, "contradictions.json")
+    if not findings:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return
+    tmp = path + ".new"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(findings, f, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def stamp_metadata(entities, branch):

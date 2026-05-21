@@ -26,4 +26,8 @@ env/
 .DS_Store
 
 # Memory
-.memory/
+.easymem/
+
+# Tests (local-only)
+tests/
+pytest.ini

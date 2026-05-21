@@ -1,13 +1,13 @@
 #!/bin/bash
 # Stop hook: structured decision capture + session summary.
-# Global — works for any project with .memory/ dir.
+# Global — works for any project with .easymem/ dir.
 [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
-[ -d "${CLAUDE_PROJECT_DIR}/.memory" ] || exit 0
+[ -d "${CLAUDE_PROJECT_DIR}/.easymem" ] || exit 0
 
 # Guard unset session ID to avoid marker collisions
 [ -n "${CLAUDE_SESSION_ID:-}" ] || exit 0
 SAFE_SID="${CLAUDE_SESSION_ID//[^a-zA-Z0-9_-]/_}"
-MARKER="/tmp/.claude-mem-reminded-${SAFE_SID}"
+MARKER="/tmp/.claude-easymem-reminded-${SAFE_SID}"
 
 # Time-based throttle: re-nudge if >30 min since last
 if [ -f "$MARKER" ]; then
@@ -24,14 +24,14 @@ fi
 touch "$MARKER"
 
 # Stamp session-start timestamp here (Stop hook) for next session's diff
-MEMORY_DIR="${CLAUDE_PROJECT_DIR}/.memory"
+EASYMEM_DIR="${CLAUDE_PROJECT_DIR}/.easymem"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
-MEM_PY="$(cat "${HOME}/.claude/memory/.venv-python" 2>/dev/null || echo python3)"
-LAST_START="${MEMORY_DIR}/.last-session-start"
+EASYMEM_PY="$(cat "${HOME}/.claude/easymem/.venv-python" 2>/dev/null || echo python3)"
+LAST_START="${EASYMEM_DIR}/.last-session-start"
 python3 -c "import time; open('${LAST_START}','w').write(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))" 2>/dev/null || true
 
 # Count session activity to calibrate prompt
-GRAPH="${MEMORY_DIR}/graph.jsonl"
+GRAPH="${EASYMEM_DIR}/graph.jsonl"
 ACTIVITY=""
 if [ -f "$LAST_START" ] && [ -f "$GRAPH" ]; then
     START_TS=$(cat "$LAST_START" 2>/dev/null || echo "")
@@ -76,34 +76,34 @@ PYEOF
 fi
 
 NEW_HEAD=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "")
-LAST_HEAD="${MEMORY_DIR}/.last-session-head"
+LAST_HEAD="${EASYMEM_DIR}/.last-session-head"
 if [ -n "$NEW_HEAD" ] && [ "$NEW_HEAD" != "$(cat "$LAST_HEAD" 2>/dev/null)" ]; then
     COMMIT_MSG=$(git -C "$CLAUDE_PROJECT_DIR" log -1 --format=%s "$NEW_HEAD" \
           2>/dev/null | head -c 200)
-    "${MEM_PY}" "${SCRIPT_DIR}/capture_tool_context.py" --mint-commit \
-        "${MEMORY_DIR}/graph.jsonl" "$NEW_HEAD" "$COMMIT_MSG" 2>/dev/null || true
+    "${EASYMEM_PY}" "${SCRIPT_DIR}/capture_tool_context.py" --mint-commit \
+        "${EASYMEM_DIR}/graph.jsonl" "$NEW_HEAD" "$COMMIT_MSG" 2>/dev/null || true
     echo "$NEW_HEAD" > "$LAST_HEAD"
 fi
 
-MEM="$HOME/.claude/memory/mem"
+EM="$HOME/.claude/easymem/easymem"
 cat << MSG
 SESSION END — persist what you learned:
 ${ACTIVITY:+$ACTIVITY
 }
 1. DECISIONS: If you chose between approaches or made architectural
    calls, persist each now:
-     $MEM decide '{"title":"what was decided","rationale":"why this approach","alternatives":["rejected option -- reason"],"scope":"affected code area"}'
+     $EMdecide '{"title":"what was decided","rationale":"why this approach","alternatives":["rejected option -- reason"],"scope":"affected code area"}'
 
 2. OUTCOMES: If you revisited a prior decision and saw it succeed or
    fail, close the loop:
-     $MEM decide '{"action":"resolve","title":"prior decision","outcome":"successful","lesson":"what we learned"}'
+     $EMdecide '{"action":"resolve","title":"prior decision","outcome":"successful","lesson":"what we learned"}'
 
 3. WARNINGS: If you found gotchas, fragile code, or foot-guns:
-     $MEM write '{"entities":[{"name":"filename.py","entityType":"file-warning","observations":["[WARNING] description"]}]}'
+     $EMwrite '{"entities":[{"name":"filename.py","entityType":"file-warning","observations":["[WARNING] description"]}]}'
 
 4. PATTERNS: If you discovered reusable knowledge (conventions,
    integration points, API quirks), persist as entities + relations:
-     $MEM write '{"entities":[...],"relations":[...]}'
+     $EMwrite '{"entities":[...],"relations":[...]}'
 
 Skip any that don't apply. Only persist what's genuinely useful.
 MSG
