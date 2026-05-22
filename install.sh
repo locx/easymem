@@ -156,6 +156,14 @@ done
 chmod +x "${HOOKS_DIR}"/*.sh "${HOOKS_DIR}"/*.py
 echo "  [ok] ${#HOOKS[@]} hooks → ${HOOKS_DIR}/"
 
+# why: if the easymem plugin is installed, hook registration is owned by
+# the plugin manifest — avoid double-fire.
+if command -v claude >/dev/null 2>&1 \
+   && claude plugin list 2>/dev/null | grep -q "^easymem"; then
+    echo "  [skip] hooks (easymem plugin detected — plugin owns hook wiring)"
+    WIRE_HOOKS=0
+fi
+
 if [ $WIRE_HOOKS -eq 1 ]; then
     # _hook_merge.py handles missing settings.json by starting from {}.
     # Format: "<event> <hook-basename> <timeout>"

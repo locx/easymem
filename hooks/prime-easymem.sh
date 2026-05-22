@@ -5,13 +5,14 @@
 
 [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
 
+EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
 EASYMEM_DIR="${CLAUDE_PROJECT_DIR}/.easymem"
 
 # Skip if project has no EasyMem setup
 [ -d "${EASYMEM_DIR}" ] || exit 0
 
 # Run maintenance regardless of environment (throttled internally to 1x/day)
-if [ -f "${HOME}/.claude/easymem/maintenance.py" ]; then
+if [ -f "$EM_ROOT/maintenance.py" ]; then
     ERR_LOG="${EASYMEM_DIR}/maintenance.err"
     # Rotate error log if >100KB
     if [ -f "$ERR_LOG" ]; then
@@ -22,10 +23,10 @@ if [ -f "${HOME}/.claude/easymem/maintenance.py" ]; then
     fi
     # Background + wait; cap with `timeout` if available (macOS lacks coreutils).
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 python3 "${HOME}/.claude/easymem/maintenance.py" \
+        timeout 5 python3 "$EM_ROOT/maintenance.py" \
             "${CLAUDE_PROJECT_DIR}" 2>>"$ERR_LOG" &
     else
-        python3 "${HOME}/.claude/easymem/maintenance.py" \
+        python3 "$EM_ROOT/maintenance.py" \
             "${CLAUDE_PROJECT_DIR}" 2>>"$ERR_LOG" &
     fi
     MAINT_PID=$!
@@ -38,12 +39,12 @@ if [ -f "${SCRIPT_DIR}/smart_recall.py" ]; then
     RECALL_OUT=$(python3 "${SCRIPT_DIR}/smart_recall.py" "${EASYMEM_DIR}" 2>/dev/null)
     RECALL_EXIT=$?
     if [ $RECALL_EXIT -ne 0 ] || [ -z "$RECALL_OUT" ]; then
-        echo "EasyMem: use \`\$HOME/.claude/easymem/easymem search <query>\` or \`\$HOME/.claude/easymem/easymem recall <query>\` for details."
+        echo "EasyMem: use \`easymem search <query>\` or \`easymem recall <query>\` for details."
     else
         echo "$RECALL_OUT"
     fi
 else
-    echo "EasyMem: use \`\$HOME/.claude/easymem/easymem search <query>\` or \`\$HOME/.claude/easymem/easymem recall <query>\` for details."
+    echo "EasyMem: use \`easymem search <query>\` or \`easymem recall <query>\` for details."
 fi
 
 exit 0

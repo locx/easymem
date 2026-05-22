@@ -1,8 +1,5 @@
 #!/bin/bash
-# Initialize a project for EasyMem infrastructure.
 # Usage: setup-project.sh [project_dir]
-#
-# Creates .easymem/, removes legacy MCP configs, migrates auto-memory.
 # Safe to re-run — skips existing files, merges configs.
 set -euo pipefail
 
@@ -15,18 +12,21 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd)" || {
 EASYMEM_DIR="${PROJECT_DIR}/.easymem"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 CLAUDE_HOME="${HOME}/.claude"
+# why: prefer plugin runtime if installed via /plugin marketplace; fall back
+# to the legacy install.sh location so install.sh installs continue to work.
+EM_ROOT="${CLAUDE_PLUGIN_ROOT:-${CLAUDE_HOME}/easymem}"
+EASYMEM_PY="$(cat "${EM_ROOT}/.venv-python" 2>/dev/null || echo python3)"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 
 echo "=== EasyMem Setup: ${PROJECT_DIR} ==="
 
-# Verify global infra exists
-if [ ! -f "${CLAUDE_HOME}/easymem/maintenance.py" ]; then
-    echo "ERROR: Global EasyMem tools not found at ${CLAUDE_HOME}/easymem/"
-    SOURCE_DIR_FILE="${CLAUDE_HOME}/easymem/.source-dir"
+if [ ! -f "${EM_ROOT}/maintenance.py" ]; then
+    echo "ERROR: EasyMem runtime not found at ${EM_ROOT}/"
+    SOURCE_DIR_FILE="${EM_ROOT}/.source-dir"
     if [ -f "$SOURCE_DIR_FILE" ]; then
         echo "Run: $(cat "$SOURCE_DIR_FILE")/install.sh first"
     else
-        echo "Run install.sh from the easymem project first"
+        echo "Run install.sh from the easymem project, or install the plugin first"
     fi
     exit 1
 fi
@@ -34,6 +34,20 @@ fi
 # ---- 1. Create .easymem directory ----
 mkdir -p "${EASYMEM_DIR}"
 echo "  [ok] ${EASYMEM_DIR}/"
+
+# ---- 1b. Stable wrapper at ~/.claude/easymem-bin/easymem ----
+# why: plugin cache path moves on update; a fixed wrapper gives CLAUDE.md
+# docs and the Bash permission a single stable invocation point.
+WRAPPER_DIR="${CLAUDE_HOME}/easymem-bin"
+WRAPPER_PATH="${WRAPPER_DIR}/easymem"
+mkdir -p "${WRAPPER_DIR}"
+cat > "${WRAPPER_PATH}" <<WRAPEOF
+#!/bin/bash
+# Forwards to the easymem runtime resolved at install time.
+exec "${EM_ROOT}/easymem" "\$@"
+WRAPEOF
+chmod +x "${WRAPPER_PATH}"
+echo "  [ok] Wrapper: ${WRAPPER_PATH} -> ${EM_ROOT}/easymem"
 
 # ---- 2. Create config.json template ----
 CONFIG_FILE="${EASYMEM_DIR}/config.json"
@@ -75,9 +89,7 @@ else
 fi
 
 # ---- 5. Migrate built-in auto-memory into graph ----
-# Claude Code's built-in auto-memory writes .md files to
-# ~/.claude/projects/-<path-with-slashes-as-dashes>/memory/
-# Parse those files and import as graph entities so nothing is lost.
+# why: salvage Claude Code's pre-existing auto-memory so nothing is lost.
 AUTO_MEM_KEY=$(echo "${PROJECT_DIR}" | sed 's|^/||; s|/|-|g')
 AUTO_MEM_DIR="${CLAUDE_HOME}/projects/-${AUTO_MEM_KEY}/memory"
 
@@ -92,8 +104,7 @@ fi
 if [ -s "${GRAPH_FILE}" ]; then
     echo ""
     echo "[index] Building TF-IDF index..."
-    EASYMEM_PY="$(cat "${CLAUDE_HOME}/easymem/.venv-python" 2>/dev/null || echo python3)"
-    "${EASYMEM_PY}" "${CLAUDE_HOME}/easymem/maintenance.py" "${PROJECT_DIR}" --force 2>/dev/null || true
+    "${EASYMEM_PY}" "${EM_ROOT}/maintenance.py" "${PROJECT_DIR}" --force 2>/dev/null || true
     if [ -f "${EASYMEM_DIR}/tfidf_index.json" ]; then
         IDX_KB=$(( $(wc -c < "${EASYMEM_DIR}/tfidf_index.json" | tr -d ' ') / 1024 ))
         echo "  [ok] TF-IDF index: ${IDX_KB}KB"
@@ -115,7 +126,6 @@ except Exception:
     print("minishlab/potion-retrieval-32M")
 ' 2>/dev/null)
 
-EASYMEM_PY="$(cat "${CLAUDE_HOME}/easymem/.venv-python" 2>/dev/null || echo python3)"
 if [ -x "$EASYMEM_PY" ] && [ "$EASYMEM_PY" != "python3" ]; then
     # Probe model2vec separately so a missing dep can be distinguished
     # from a bad embed_model name (different remediation).
@@ -133,7 +143,7 @@ print(f"  [ok] embed model ready: {m}")
     else
         echo "  [warn] could not preload embed model: ${PROJECT_MODEL}"
         echo "         fix embed_model in ${EASYMEM_DIR}/config.json, then:"
-        echo "         '${CLAUDE_HOME}/easymem/easymem' rebuild"
+        echo "         '${WRAPPER_PATH}' rebuild"
     fi
 else
     echo "  [skip] vector setup — run install.sh first to enable hybrid search"
@@ -142,7 +152,7 @@ fi
 # ---- 7. Add Bash permission for easymem commands in .claude/settings.json ----
 PROJ_SETTINGS_DIR="${PROJECT_DIR}/.claude"
 PROJ_SETTINGS="${PROJ_SETTINGS_DIR}/settings.json"
-EM_PERM="Bash(\$HOME/.claude/easymem/easymem *)"
+EM_PERM="Bash(\$HOME/.claude/easymem-bin/easymem *)"
 
 mkdir -p "${PROJ_SETTINGS_DIR}"
 python3 - "${PROJ_SETTINGS}" "${EM_PERM}" << 'PYEOF'
@@ -184,40 +194,39 @@ EASYMEM_SECTION='## EasyMem (Easy Memory)
 
 Knowledge graph in `.easymem/` — entities, relations, decisions. Searchable via TF-IDF, branch-aware, with decay. A SessionStart hook prints a compact status line automatically (~50 tokens).
 
-All commands use `$HOME/.claude/easymem/easymem`:
+All commands use `$HOME/.claude/easymem-bin/easymem`:
 
 ### Read
 
-- `$HOME/.claude/easymem/easymem search <query>` — find entities by topic (use before writing to avoid duplicates)
-- `$HOME/.claude/easymem/easymem recall <query>` — search + 1-hop graph neighbors (use to understand connections)
-- `$HOME/.claude/easymem/easymem diff` — what changed since last session
-- `$HOME/.claude/easymem/easymem status` — graph health + pending decision nudge
+- `$HOME/.claude/easymem-bin/easymem search <query>` — find entities by topic (use before writing to avoid duplicates)
+- `$HOME/.claude/easymem-bin/easymem recall <query>` — search + 1-hop graph neighbors (use to understand connections)
+- `$HOME/.claude/easymem-bin/easymem diff` — what changed since last session
+- `$HOME/.claude/easymem-bin/easymem status` — graph health + pending decision nudge
 
 ### Write
 
-- `$HOME/.claude/easymem/easymem write '\''{"entities":[{"name":"AuthService","entityType":"service","observations":["Handles JWT tokens"]}]}'\''`
-- `$HOME/.claude/easymem/easymem write '\''{"relations":[{"from":"AuthService","to":"UserDB","relationType":"depends-on"}]}'\''`
-- `$HOME/.claude/easymem/easymem decide '\''{"title":"Use Postgres over Mongo","rationale":"need multi-doc txns","alternatives":["MongoDB -- no txns"]}'\''`
-- `$HOME/.claude/easymem/easymem remove '\''{"entity_names":["OldService"]}'\''`
+- `$HOME/.claude/easymem-bin/easymem write '\''{"entities":[{"name":"AuthService","entityType":"service","observations":["Handles JWT tokens"]}]}'\''`
+- `$HOME/.claude/easymem-bin/easymem write '\''{"relations":[{"from":"AuthService","to":"UserDB","relationType":"depends-on"}]}'\''`
+- `$HOME/.claude/easymem-bin/easymem decide '\''{"title":"Use Postgres over Mongo","rationale":"need multi-doc txns","alternatives":["MongoDB -- no txns"]}'\''`
+- `$HOME/.claude/easymem-bin/easymem remove '\''{"entity_names":["OldService"]}'\''`
 
 ### Maintain
 
-- `$HOME/.claude/easymem/easymem doctor` — deep health check (orphan relations, stale decisions, index age)
-- `$HOME/.claude/easymem/easymem rebuild` — force TF-IDF index refresh
+- `$HOME/.claude/easymem-bin/easymem doctor` — deep health check (orphan relations, stale decisions, index age)
+- `$HOME/.claude/easymem-bin/easymem rebuild` — force TF-IDF index refresh
 
 ### Rules
 
-1. **Search before write.** Run `$HOME/.claude/easymem/easymem search` before creating entities to avoid duplicates.
-2. **Decisions are mandatory.** Major task + architectural choice + no `$HOME/.claude/easymem/easymem decide` = incomplete.
-3. **Resolve stale decisions.** If SessionStart shows pending decisions, resolve with `$HOME/.claude/easymem/easymem decide '\''{"action":"resolve","title":"...","outcome":"successful","lesson":"..."}'\''`.
-4. **Do not edit `.easymem/` files directly.** Always use `$HOME/.claude/easymem/easymem` commands.
+1. **Search before write.** Run `$HOME/.claude/easymem-bin/easymem search` before creating entities to avoid duplicates.
+2. **Decisions are mandatory.** Major task + architectural choice + no `$HOME/.claude/easymem-bin/easymem decide` = incomplete.
+3. **Resolve stale decisions.** If SessionStart shows pending decisions, resolve with `$HOME/.claude/easymem-bin/easymem decide '\''{"action":"resolve","title":"...","outcome":"successful","lesson":"..."}'\''`.
+4. **Do not edit `.easymem/` files directly.** Always use `$HOME/.claude/easymem-bin/easymem` commands.
 5. **Aliases** in `.easymem/aliases.json` improve search: `{"groups": [["cache", "memoize"], ["api", "endpoint"]]}`'
 
 if [ ! -f "${CLAUDE_MD}" ]; then
-    echo "  [skip] No CLAUDE.md found — easymem instructions not added"
-    echo "         Create a CLAUDE.md and re-run, or add manually"
+    printf '%s\n' "$EASYMEM_SECTION" > "${CLAUDE_MD}"
+    echo "  [ok] Created CLAUDE.md with easymem plugin section"
 elif grep -qE '## EasyMem \(Easy Memory\)' "${CLAUDE_MD}" 2>/dev/null; then
-    # Replace existing section: strip old, append new
     python3 "${SCRIPT_DIR}/scripts/_strip_memory_section.py" "${CLAUDE_MD}"
     printf '%s\n' "$EASYMEM_SECTION" >> "${CLAUDE_MD}"
     echo "  [ok] Upgraded easymem plugin section in CLAUDE.md"
@@ -231,6 +240,7 @@ echo "============================================================"
 echo "  Setup complete: ${PROJECT_NAME}"
 echo ""
 echo "  Graph:    ${GRAPH_FILE}"
+echo "  Wrapper:  ${WRAPPER_PATH}"
 echo "  Access:   CLI bridge (Bash) — works in both CLI and VSCode"
 echo ""
 echo "  Commands:"

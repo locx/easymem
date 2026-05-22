@@ -1,422 +1,308 @@
 # easymem 🧠
 
+### 🚀 Persistent Memory · Hybrid Retrieval · Self-Managed
+
+**Persistent memory for Claude Code agents.** Your agent remembers the project's architecture, files, and past decisions across sessions — so it never starts from zero.
+
+**Install in two lines:**
+
+```text
+/plugin marketplace add locx/easymem
+/plugin install easymem
+```
+
+> **LongMemEval-S** · R@5 **0.948** · MRR **0.888** · p50 **116 ms** (n=500). Local-first · zero cloud · zero API keys.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-yellow.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20WSL-lightgrey.svg)](https://github.com/locx/easymem)
-
-**Hardened, high-performance, self-governing memory for Claude Code agents.**
-
-Stop starting every session from scratch. **easymem** provides a persistent knowledge graph that captures decisions, remembers buggy patterns, and strengthens with every turn.
-
-### 🚀 Hybrid Retrieval · Self-Governing · Pure Python + numpy
-
-```
-Session 1: "Use LWW for SyncManager" ──▶ Capture Decision + Context
-Session 2: "How does sync work?"     ──▶ Hybrid recall (TF-IDF ⊕ vector RRF) + Graph Neighbors
-```
 
 ---
 
 ## Contents
 
-|      # | Section | Key Focus |
-| -----: | --------------------------------------------------- | --------------------------------------------------------------------------- |
-|  **1** | [**Memory Advantage**](#1-memory-advantage)         | Hybrid · Branch-aware · Hebbian · Atomic Resilience |
-|  **2** | [**How It Works**](#2-how-it-works)                 | Graph · Tools · Hybrid Search · Maintenance · Hooks · Write Path |
-|  **3** | [**Getting Started**](#3-getting-started)           | Install · Flags · Slash Commands |
-|  **4** | [**Operations & Usage**](#4-operations--usage)       | Zero Effort · Session Walkthrough · Cleanup |
-|  **5** | [**Decision Tracking**](#5-decision-tracking)       | Record · List · Update Outcome |
-|  **6** | [**Configuration**](#6-configuration)               | Limits · Tuning · Default Values |
-|  **7** | [**Architecture & Design**](#7-architecture--design)| Design Philosophy · Layout · Package Internals |
-|  **8** | [**Project Info**](#8-project-info)                  | Troubleshooting · Limits · Platform · License |
+|      # | Section                                                              | Key Focus                                            |
+| -----: | -------------------------------------------------------------------- | ---------------------------------------------------- |
+|  **1** | [**What It Remembers**](#1-what-it-remembers)                        | Architecture · Files · Decisions · Slots             |
+|  **2** | [**Demo**](#2-demo)                                                  | Capture · Recall · Cross-Session Loop                |
+|  **3** | [**Getting Started**](#3-getting-started)                            | Install · Auto-Init · Nudge Controls                 |
+|  **4** | [**Operations & Usage**](#4-operations--usage)                       | Autopilot · Day-Two Commands                         |
+|  **5** | [**Under the Hood**](#5-under-the-hood)                              | Self-Managed · Hybrid Retrieval                      |
+|  **6** | [**Compared to the Field**](#6-compared-to-the-field)                | agentmemory · Mem0 · Zep · Letta                     |
+|  **7** | [**How It Works**](#7-how-it-works)                                  | Storage · Code Indexer · Hooks                       |
+|  **8** | [**Project Info**](#8-project-info)                                  | Troubleshooting · Limits · Platform · License        |
 
 ---
 
-## 1. Memory Advantage
+## 1. What It Remembers
 
-Architecture-aware memory with semantic recall, not just flat files.
+Four pillars in one hybrid retrieval graph.
 
-| Feature                  | Impact                                                                                    |
-| ------------------------ | ----------------------------------------------------------------------------------------- |
-| **Hybrid Retrieval**     | 🔀 TF-IDF ⊕ vector (model2vec int8) fused via Reciprocal Rank Fusion. Lexical precision + semantic recall. |
-| **Branch-aware**         | 🌿 Scores rebalance automatically as you switch git branches. `main` is always preserved. |
-| **Hebbian Recall**       | 🧠 Frequently searched knowledge is reinforced; untouched data fades out.                 |
-| **Self-Regulating**      | 🔄 Daily maintenance scores, prunes, and consolidates. Zero intervention required.        |
-| **Structured Decisions** | 📝 Captures rationale, chosen approach, and alternatives. Linked directly to components.  |
-| **Contradiction Watch**  | ⚖️  Pairwise scan flags entities with conflicting observations (sidecar JSON).            |
-| **Secret Scrubbing**     | 🔒 `AKIA…`, `ghp_…`, `sk-…`, `Bearer …`, `PRIVATE KEY` redacted before persistence.       |
-| **Atomic Resilience**    | 🛡️  `flock` + `fsync` + `os.replace`. Old or new survives; the graph never corrupts.      |
-| **Incremental I/O**      | ⚡ Only scales with changes, not graph size; reads stay sub-second.                       |
+| Pillar                       | What gets stored                                                                                              | How it surfaces                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **🏗&nbsp;Architecture**      | Module relations, repeated workflow patterns, branch-aware context                                            | Graph traversal on `recall`; auto-injected at session start      |
+| **📁&nbsp;Files**            | `file:<path>`, `function:<file>::<name>`, `class:<file>::<name>` entities with exports / imports / docstrings | `easymem search` and `easymem index-code`                        |
+| **🧭&nbsp;Decisions**        | Title, rationale, alternatives, outcome — linked to the entities they affect                                  | `easymem decide` to capture; surfaced on the next session        |
+| **🪪&nbsp;Slots**            | Editable `persona`, `preferences`, `guidelines` strings                                                       | Injected at session start                                        |
 
-> **CLAUDE.md** defines your static rules; the **Knowledge Graph** tracks your architectural evolution.
+All four live in the same hybrid retrieval graph — one search returns the most relevant mix, not four siloed queries.
 
 ---
 
-## 2. How It Works
+## 2. Demo
 
-<div align="center">
-<pre>
-┌─────────────────────────────────────────────────────────────────────┐
-│                        SESSION LIFECYCLE                            │
-│                                                                     │
-│  ┌──────────────┐    ┌────────────────┐    ┌─────────────────────┐  │
-│  │ Session Start│    │ During Session │    │ Session End         │  │
-│  │              │    │                │    │                     │  │
-│  │ prime-       │    │  CLI Bridge    │    │ capture-decisions   │  │
-│  │ easymem.sh   │──▶ │ (9 cmds + mint)│──▶ │ reminds Claude to   │  │
-│  │              │    │                │    │ persist decisions   │  │
-│  └──────┬───────┘    └───────┬────────┘    └─────────────────────┘  │
-│         │                    │                                      │
-│         ▼                    ▼                                      │
-│  ┌──────────────┐    ┌────────────────┐                             │
-│  │ maintenance  │    │ capture-tool   │                             │
-│  │ .py (1x/day) │    │ -context       │                             │
-│  │              │    │ (scrub + mint) │                             │
-│  └──────┬───────┘    └───────┬────────┘                             │
-│         │                    │                                      │
-│         │            ┌───────▼────────┐                             │
-│         │            │ prime-on-      │                             │
-│         │            │ compact.sh     │                             │
-│         │            │ (PreCompact)   │                             │
-│         │            └───────┬────────┘                             │
-│         │                    │                                      │
-│         ▼                    ▼                                      │
-│  ┌──────────────────────────────────────────────┐                   │
-│  │           .easymem/graph.jsonl               │                   │
-│  │    entities + relations + observations       │                   │
-│  │     + _branch · _source · _created stamps    │                   │
-│  │           (append-only writes)               │                   │
-│  └──────────────────────────────────────────────┘                   │
-└─────────────────────────────────────────────────────────────────────┘
-</pre>
-</div>
+```bash
+# 1. Capture — index your codebase, record a decision, pin a persona
+$ easymem index-code .
+indexed: 47 files, 312 symbols, removed: 0 stale, relations: 89
 
-### a. Knowledge Graph
+$ easymem decide '{"title":"Use JWT","rationale":"Stateless, no session DB","alternatives":["cookies"]}'
+✓ decision recorded
 
-One `graph.jsonl` per project. Two object types: **Entities** (nodes) and **Relations** (edges).
-
-```json
-{"type":"entity","name":"SyncManager","entityType":"component",
- "observations":["Uses LWW resolution"],
- "_branch":"feature/sync","_source":"episode:Claude"}
-
-{"type":"relation","from":"SyncManager","to":"ProviderRegistry","relationType":"uses"}
+$ easymem slots set persona "senior backend engineer; prefer explicit types"
+✓ persona set
 ```
 
-Each entity carries facts, `_branch`, `_created`, and `_source` provenance. Claude traverses relations to surface knowledge it wasn't told to look for.
+```bash
+# 2. Recall — next day, in a new Claude Code session
+SessionStart hook (auto-injected, ~50 tokens):
+  📌 persona: senior backend engineer; prefer explicit types
+  Recent: Decision "Use JWT" (2026-05-22) · file:src/auth.py
+  Pending decisions: 0
 
-**Episodes** (`entityType: "episode"`) auto-record what happened — three kinds minted by PostToolUse:
+USER: "How do we handle auth?"
 
-- `episode:err:*` — errors
-- `episode:churn:*` — high-frequency file edits
-- `episode:commit:*` — git commits
+Agent → easymem search "how do we handle auth?"
+─ Decision (2026-05-22)        "Use JWT" — stateless, no session DB
+─ file:src/auth.py             (export: login, login_handler; doc: Auth helpers)
+─ function:src/auth.py::login
+─ Workflow "auth refactor"     4 related sessions (login → token → refresh)
 
-They flow through the same write path, scoring, and pruning as any entity.
+Agent → easymem recall "AuthService"
+        → JWTValidator, SessionStore, login_handler (1-hop neighbours)
 
-### b. Tool Reference
-
-All access via the `easymem` CLI wrapper (backed by `easymem-cli.py`).
-
-| Command           | Role                                                                          | Complexity |
-| ----------------- | ----------------------------------------------------------------------------- | ---------- |
-| `easymem search`  | Hybrid lookup: TF-IDF postings + dense dot-product, fused via RRF             | O(k + V)   |
-| `easymem recall`  | Smart context: search + 1-hop neighbors via cached adjacency                  | O(V + E)   |
-| `easymem write`   | Append-only create/merge of entities, relations, observations (flock-guarded) | O(1)       |
-| `easymem decide`  | Append-only architectural trade-off + rationale entry                         | O(1)       |
-| `easymem remove`  | Atomic deletion or renaming — locked full-graph rewrite                       | O(n)       |
-| `easymem status`  | Real-time health, stats, and pending decision nudges                          | O(n)       |
-| `easymem diff`    | Entities/relations changed since last session marker                          | O(n)       |
-| `easymem doctor`  | Locate orphans, technical debt, and stale indices                             | O(n)       |
-| `easymem rebuild` | Sorted-merge consolidation + full TF-IDF/vector rebuild                       | O(n log n) |
-
-### c. How Search Works — Hybrid Retrieval
-
-Two independent rankers, fused by **Reciprocal Rank Fusion (RRF)**:
-
-**Lexical (TF-IDF)** — High-speed cosine over a positional inverted index.
-
-- 🧩 **Stemming**: Integrated Porter Stemmer matches variants (e.g., `running` → `run`).
-- 📂 **Inverted Index**: Only entities with query terms are scored.
-- ⚖️ **Distinctive Weights**: BM25-style scaling prioritizes rare terms over boilerplate.
-
-**Vector (model2vec, int8)** — Static embeddings, no GPU, no inference server.
-
-- 🧠 **Semantic match**: catches paraphrases, synonyms, conceptual neighbors TF-IDF misses.
-- 🪶 **Quantized**: int8 storage; query and corpus quantized identically.
-- ⚡ **Sub-ms**: numpy dot-product over the in-memory corpus matrix.
-
-**RRF fusion** — rank-based, scale-free. `score(d) = Σ 1 / (k + rank_i(d))`. No tuning.
-
-Disable vectors with `install.sh --no-vector` to keep lexical-only deployment (zero pip deps).
-
-### d. Maintenance — Self-Cleaning Pipeline
-
-Runs at session start, ≤1x/24h.
-
-```
-      graph.jsonl ──▶ backup ──▶ stamp ──▶ score ──▶ prune ──▶ consolidate
-                                                                    │
-            graph.jsonl ◀── promote ◀── index ◀── prune recall ◀── cap obs
-                              │
-                              ▼
-                ~/.claude/projects/<slug>/memory/MEMORY.md
-                  (top-10 entities, between markers)
+USER: "Switch to a CRDT-based session store"
+Agent edits the code, then captures the follow-up decision:
+  easymem decide '{"title":"CRDT session store",
+                    "rationale":"Preserve concurrent edits",
+                    "alternatives":["LWW — loses concurrent writes"]}'
 ```
 
-| Phase             | Logic                                            |
-| ----------------- | ------------------------------------------------ |
-| **Backup**        | O(1) hard-link before any mutation               |
-| **Stamping**      | Automatic `_branch`, `_created`, `_source` tags  |
-| **Scoring**       | `obs_count × recency_weight × log(recall_count)` |
-| **Pruning**       | Removes score < 0.1 unless bound by relations    |
-| **Consolidating** | Merges near-duplicate entities (Jaccard + name)  |
-| **Indexing**      | Full TF-IDF + vector rebuild                     |
-| **Promotion**     | Top-10 entities written to Claude's `MEMORY.md`  |
-| **Contradiction** | Sidecar `.easymem/contradictions.json` flagged   |
-
-### e. Lifecycle Hooks
-
-Five hooks, CLI only. VSCode detected and skipped in <1ms — `CLAUDE.md` handles it.
-
-| Hook                      | Event        | Action                                                                |
-| ------------------------- | ------------ | --------------------------------------------------------------------- |
-| `prime-easymem.sh`        | SessionStart | Maintenance + scored recall with 1-hop relations + pending decisions  |
-| `prime-on-compact.sh`     | PreCompact   | Inject compact recall into post-compaction context (survives compact) |
-| `capture-tool-context.sh` | PostToolUse  | Surface file warnings from graph; auto-mint episodes (throttled)      |
-| `capture-decisions.sh`    | Stop         | Persist-decisions reminder                                            |
-| `nudge-setup.sh`          | SessionStart | One-time setup notice (no `.easymem/`)                                |
-
-### f. Write Path
-
-Every persisted entity flows through the same pipeline:
-
-```text
-  caller (CLI / hook / episode mint)
-        │
-        ▼
-  ┌──────────────────────────────────────────────┐
-  │ 1. Scrub   AKIA… · ghp_… · sk-… · Bearer …   │
-  │            · PRIVATE KEY  → redacted         │
-  │ 2. Stamp   _branch · _created · _source      │
-  │ 3. Lock    flock(.easymem/graph.jsonl)       │
-  │ 4. Append  JSONL line → fsync                │
-  │ 5. Replace (rewrites only) os.replace atomic │
-  └──────────────────────────────────────────────┘
-        │
-        ▼
-  graph.jsonl  (durable, branch-aware, scrubbed)
-```
-
-Manual `easymem write`, hook-driven episode auto-mint, and consolidation during maintenance all use this path.
+- **Why · Where · How** — decision, file + symbol, and workflow surfaced in one search hop.
+- **Primed with persona** — slots auto-injected at SessionStart; no re-explaining.
+- **Closes the loop** — the new CRDT decision lands in the same graph, available to every future session.
 
 ---
 
 ## 3. Getting Started
 
-Requires Python 3.10+ and git. Vector retrieval pulls 3 pip deps (`requirements.txt`); `--no-vector` skips.
+Requires Python 3.10+ and git. Vector retrieval pulls 3 pip deps (`requirements.txt`); `install.sh --no-vector` skips them.
 
-### a. First Run
+### a. Claude Code (recommended)
+
+```text
+/plugin marketplace add locx/easymem
+/plugin install easymem
+```
+
+The plugin wires `SessionStart` / `PostToolUse` / `Stop` / `PreCompact` hooks globally. Per-project state is created on first use — see §3.c.
+
+### b. Other agents (Codex, scripts, CI)
 
 ```bash
 git clone https://github.com/locx/easymem.git
 cd easymem
-./install.sh                  # Deploys runtime + hooks + venv (with model2vec/numpy/orjson)
-./setup-project.sh /path      # Injects CLAUDE.md bridge + bootstraps graph
+./install.sh                       # Deploys runtime + hooks + venv (model2vec, numpy, orjson)
+./install.sh --minimal             # OR: files only, no hook wiring, no vector deps
 
-# Use the 'easymem' wrapper globally
-export PATH="$HOME/.claude/easymem:$PATH"
-easymem status
+# Optional: initialize a project explicitly (the SessionStart hook does this on first use)
+./setup-project.sh /path/to/project
+
+# Use the easymem wrapper globally
+export PATH="$HOME/.claude/easymem-bin:$PATH"
+easymem status                     # Verify install
 ```
 
-Installer flags:
+| Flag          | Effect                               |
+| ------------- | ------------------------------------ |
+| `--no-vector` | Skip pip deps; lexical (TF-IDF) only |
+| `--no-hooks`  | Skip hook wiring (manual activation) |
+| `--minimal`   | Both of the above                    |
 
-| Flag           | Effect                                                  |
-| -------------- | ------------------------------------------------------- |
-| `--no-vector`  | Skip pip deps; lexical (TF-IDF) only                    |
-| `--no-hooks`   | Skip `settings.json` wiring (manual hook activation)    |
-| `--minimal`    | Both of the above                                       |
+`install.sh` auto-detects the plugin and skips its own hook registration to prevent double-fire.
 
-### b. Slash Commands
+### c. First-Session Auto-Init
 
-Quick access from any conversation:
+When Claude Code starts in a project without `.easymem/`, the `SessionStart` hook auto-runs setup. It creates:
 
-| Command            | Action                                       |
-| ------------------ | -------------------------------------------- |
-| `/easymem-recall`  | Hybrid search + 1-hop neighbors              |
-| `/easymem-status`  | Health, pending decisions, index age         |
-| `/easymem-decide`  | Capture a structured architectural decision  |
+- **`.easymem/`** — graph + config + indices (also added to your `.gitignore`).
+- **`~/.claude/easymem-bin/easymem`** — stable wrapper. `CLAUDE.md` docs and the Bash allow-list both reference this path so they don't drift across plugin updates.
+- **`.claude/settings.json`** — appends `Bash($HOME/.claude/easymem-bin/easymem *)` to the allow-list.
+- **`CLAUDE.md`** — appends an EasyMem section so the agent knows the commands available to it. Creates the file if it doesn't exist.
+
+If auto-setup fails (e.g. missing `python3`), the hook prints the manual `setup-project.sh` command instead.
+
+### d. Suppressing the Nudge
+
+If `.easymem/` is later missing on a session (you deleted it deliberately, or auto-setup failed), the hook nudges once per 24 hours. After three nudges it offers `easymem nudge suppress` — that writes a marker at `~/.config/easymem/nudge/<hash>.suppress` and silences the hook for that project. Delete the marker to re-enable.
 
 ---
 
 ## 4. Operations & Usage
 
-### a. Zero Effort Usage
+### a. Autopilot — Hooks Drive the Loop
 
-Hooks + `CLAUDE.md` drive everything (timing: §2.e). During work, Claude silently searches before editing unfamiliar code, records decisions, flags fragile code, links related entities; PostToolUse auto-mints episode entities with `_source` provenance.
+Hooks + the agent's `CLAUDE.md` section drive the daily loop. The agent searches before editing unfamiliar code, captures decisions, links related entities, and refreshes the code-structure index — without explicit invocation.
 
-Visible operator artifacts:
+Visible artifacts: `.easymem/graph.jsonl` (append-only entity + relation log) and `.easymem/contradictions.json` (conflict sidecar).
 
-- `~/.claude/projects/<slug>/memory/MEMORY.md` — top-10 entities auto-promoted between markers each maintenance run.
-- `.easymem/contradictions.json` — sidecar flags entities with conflicting observations.
-- Slash commands `/easymem-recall`, `/easymem-status`, `/easymem-decide` — usable from any conversation.
-
-### b. A Session in Action
-
-```
-1. USER: "How does our sync handle conflicts?"
-   Claude → easymem search "sync conflict" → SyncManager (lexical 0.87, vector 0.71)
-                                            → RRF rank 1
-   Claude → easymem recall "SyncManager" → ProviderRegistry, ConfigStore
-
-2. USER: "Switch from LWW to CRDT"
-   Claude edits code
-   Claude silently: easymem decide '{"title":"Switch from LWW to CRDT",
-     "chosen":"CRDT merge","rationale":"Preserve concurrent edits",
-     "alternatives":["LWW — simpler but loses writes"]}'
-```
-
-### c. Day-Two — Inspect, Update, Cleanup
+### b. Day-Two — Inspect, Update, Cleanup
 
 ```bash
-# Update — refresh runtime + bridge
-./install.sh && ./setup-project.sh /path/to/project
+# Search and recall
+easymem search "JWT validation"
+easymem recall "JWT validation"           # search + 1-hop neighbours
 
-# Inspect — orphans, stale index, contradictions, pending decisions
-easymem doctor
+# Capture and pin
+easymem decide '{"title":"...", "rationale":"...", "alternatives":[]}'
+easymem slots set persona "senior Python engineer"
+
+# Inspect
+easymem status                            # graph health + pending decision count
+easymem doctor                            # orphans, stale index, contradictions
+easymem diff                              # what changed since last session
+
+# Refresh indices
+easymem index-code .                      # refresh code-structure entities
+easymem rebuild --rebuild-now             # force TF-IDF + vector rebuild
+
+# Update
+#   Plugin install: /plugin update easymem    (from within Claude Code)
+#   Legacy install: git pull && ./install.sh && ./setup-project.sh /path/to/project
 
 # Sync — portable JSON bundle for cross-machine moves
 ./export-easymem.sh /path/to/project bundle.json
 ./import-easymem.sh bundle.json /path/to/target
 
 # Cleanup — prompts before destructive steps
-./cleanup.sh project /path      # Remove one project graph
-./cleanup.sh global             # Remove runtime + hooks
+./cleanup.sh project /path/to/project     # Remove .easymem/, settings entries, CLAUDE.md section
+./cleanup.sh global                       # Remove ~/.claude/easymem/ + hook wiring
 ```
 
 ---
 
-## 5. Decision Tracking
+## 5. Under the Hood
 
-Decisions are **structured graph entities** — not notes, not comments.
+### a. Self-Managed Maintenance
 
-### a. Record a Decision
+Runs on schedule (and on `easymem rebuild`); you don't invoke these — hooks do.
 
-```bash
-easymem decide '{
-  "title": "Use PostgreSQL over MongoDB for user data",
-  "rationale": "ACID for billing. Relational model fits user/org hierarchy.",
-  "chosen": "PostgreSQL",
-  "alternatives": ["MongoDB — no multi-doc txns", "CockroachDB — too much ops"]
-}'
-```
+- **🔄 Hebbian decay** — frequently recalled entities strengthen; untouched ones fade and prune past `MAX_AGE_DAYS`.
+- **⚖️ Contradiction auto-resolve** — two same-source episodes that conflict: later supersedes, earlier marked `superseded:` (not deleted).
+- **🧩 Workflow extraction** — episodes sharing a neighbour set ≥3 times mint a `workflow:` entity (e.g. "auth refactor: login → token → refresh").
+- **🌿 Branch-aware scoring** — relevance rebalances as you switch git branches. `main` is always preserved.
+- **📌 Code-stamp watch** — source files past the recorded stamp trigger an index refresh on the next pass.
 
-### b. List Decisions
+### b. Fast Hybrid Retrieval
 
-```bash
-easymem status
-```
+| Stage                                | Effect                                                                |
+| ------------------------------------ | --------------------------------------------------------------------- |
+| 🔀 **TF-IDF per-observation**        | Indexed at observation level, not per-entity — finer-grained matches. |
+| 🧮 **Int8 model2vec vectors**        | ~256 dim — fast cosine, small memory.                                 |
+| 🪢 **RRF fusion (k=60)**             | Merges TF-IDF and vector ranks without re-scoring.                    |
+| 🎯 **IDF-weighted re-rank (top 30)** | Cheap; lifts R@5 by ~5pp on LongMemEval-S.                            |
+| 🪟 **Session diversification**       | Caps hits per source — no single verbose conversation dominates.      |
 
-Returns all decisions sorted by recency with their current outcome status. Pending decisions older than 2 days are flagged.
-
-### c. Update the Outcome
-
-```bash
-easymem decide '{"action":"resolve","title":"Use PostgreSQL over MongoDB","outcome":"successful","lesson":"ACID saved us during billing migration"}'
-```
-
-Outcomes: `pending` · `successful` · `failed` · `revised` · `adopted` · `rejected` · `deferred`
+> LongMemEval-S p50 **116 ms**, p95 **157 ms** end-to-end including maintenance per query.
 
 ---
 
-## 6. Configuration
+## 6. Compared to the Field
 
-`.easymem/config.json` — delete any key for default:
+|                        | easymem                           | agentmemory                                | Mem0         | Zep              | Letta             |
+| ---------------------- | --------------------------------- | ------------------------------------------ | ------------ | ---------------- | ----------------- |
+| LongMemEval-S R@5      | **0.948**                         | 0.952 (claim)                              | —            | —                | —                 |
+| External deps          | none (Python pip deps only)       | none (SQLite + iii)                        | vector DB    | Postgres + Neo4j | Postgres + vector |
+| Code-structure indexer | **yes**                           | file-access only                           | no           | no               | no                |
+| Local-first            | yes                               | yes                                        | optional     | optional         | yes               |
+| Memory tiers           | episode → consolidated → workflow | working → episodic → semantic → procedural | flat + facts | temporal graph   | hierarchical      |
+| Install                | `/plugin install`                 | `/plugin install`                          | SDK call     | run server       | run server        |
 
-| Key                  | Default                       | Effect                                |
-| -------------------- | ----------------------------- | ------------------------------------- |
-| `decay_threshold`    | 0.1                           | Score floor for pruning               |
-| `max_age_days`       | 90                            | Age penalty ceiling                   |
-| `throttle_hours`     | 24                            | Maintenance frequency                 |
-| `min_merge_name_len` | 4                             | Exact-match threshold for short names |
-| `embed_model`        | `minishlab/potion-retrieval-32M` | Static embedding model (model2vec)    |
+Non-easymem rows are each project's own published claim; verify against the source before citing. `—` indicates no public R@5 on LongMemEval-S found.
 
 ---
 
-## 7. Architecture & Design
+## 7. How It Works
 
-### a. Design Philosophy
+```text
+   ┌─────────────────────┐
+   │  Claude Code Agent  │
+   └──────────┬──────────┘
+              │  hooks  +  Bash CLI
+              ▼
+   ┌─────────────────────┐   search · recall · decide
+   │  easymem CLI        │   slots · index-code · status
+   └──────────┬──────────┘
+              │  search query
+              ▼
+   ┌──────────────────────────────────────────────────────────────────────────────┐
+   │  semantic_server                                                             │
+   │    TF-IDF (per-obs) → Vector (int8 model2vec) → RRF fusion → IDF re-rank     │
+   └──────────┬───────────────────────────────────────────────────────────────────┘
+              │  append-only JSONL
+              ▼
+   ┌──────────────────────────────────────────────────────────────────────────────┐
+   │  .easymem/                                                                   │
+   │  graph.jsonl · tfidf_index · vectors.bin · slots.json · contradictions.json  │
+   └──────────────────────────────────────────────────────────────────────────────┘
 
-1. **Agent-Centric**: Terse outputs and graph guidance built for LLMs.
-2. **Lean Stack**: Pure Python + numpy + model2vec + orjson. No DB, no inference server.
-3. **Implicit Growth**: Memory is a side-effect of work, not a workflow tax.
-4. **Hardened IO**: Atomic replace + fsync. No partial writes.
-
-### b. Layout
-
-```
-~/.claude/                              GLOBAL RUNTIME
-  hooks/
-    prime-easymem.sh                    SessionStart → maintenance + recall
-    prime-on-compact.sh                 PreCompact → context injection
-    capture-tool-context.sh/.py         PostToolUse → file warnings + episodes
-    capture-decisions.sh                Stop → decision reminder
-    nudge-setup.sh                      SessionStart → first-run notice
-  easymem/
-    easymem                             Wrapper binary (resolves project root)
-    easymem-cli.py                      CLI bridge
-    maintenance.py                      Decay / prune / merge / index / promote
-    semantic_server/                    Engine package (18 modules)
-    venv/                               Vector runtime (model2vec/numpy/orjson)
-
-<project>/                              PER-PROJECT
-  CLAUDE.md                             Bridge instructions (auto-injected)
-  .easymem/
-    graph.jsonl                         The graph (append-only)
-    tfidf_index.json                    Lexical index
-    vector_index.npy                    Quantized embedding matrix (int8)
-    recall_counts.json                  Hebbian frequencies
-    contradictions.json                 Conflict sidecar (auto-generated)
-    config.json                         Project-local overrides
+   Background: SessionStart / PostToolUse / Stop / PreCompact
+   hooks + maintenance + code-indexer keep the graph fresh.
 ```
 
-### c. Under the Hood — Package Internals
+### a. Storage
 
-Modular, low-latency engine core in `semantic_server/` (18 modules):
+Append-only JSONL at `.easymem/graph.jsonl`. Each line is an entity or a relation. `flock` + `fsync` + `os.replace` make every write atomic — either the old or new graph survives, never a partial.
 
-| Component        | Support Modules                       | Role                                            |
-| ---------------- | ------------------------------------- | ----------------------------------------------- |
-| **Persistence**  | `graph`, `_json`, `io_utils`          | Atomic I/O, byte-offset reads, orjson recovery  |
-| **Intelligence** | `search`, `recall`, `vector`, `stem`  | TF-IDF + vector RRF, Hebbian LRU, Porter Stemmer |
-| **Mechanics**    | `text`, `traverse`                    | Tokenization, synonyms, BFS-cached adjacency    |
-| **Maintenance**  | `maintenance_utils`                   | Pruning, consolidation, contradiction detection |
-| **Interface**    | `tools`, `cache`, `protocol`, `server`| Command logic, tiered eviction, JSON-RPC        |
-| **Lifecycle**    | `bootstrap`, `config`                 | Project init, env-driven settings               |
+### b. Code-Structure Indexer
+
+Per source file: emit `file:<rel-path>` with observations for `lang`, `export:`, `import:`, and per-line `doc:`. Symbol-level entities `function:<file>::<name>` and `class:<file>::<name>` link back via `defined_in` relations. Cross-file `imports` relations connect resolved file pairs.
+
+Python uses `ast` for exact extraction. TypeScript / JavaScript handles re-exports and aliased exports via regex. Go, Rust, Ruby use regex — good enough for retrieval, not for static analysis.
+
+### c. Hooks
+
+| Event          | Script                      | Purpose                                          |
+| -------------- | ----------------------------| ------------------------------------------------ |
+| `SessionStart` |  `prime-easymem.sh`         | Inject recent decisions and top-scored entities  |
+| `SessionStart` |  `nudge-setup.sh`           | Auto-init project / first-run hint               |
+| `SessionStart` |  `prime-slots.sh`           | Inject pinned slots                              |
+| `PostToolUse`  |  `capture-tool-context.sh`  | Capture tool calls as observations               |
+| `Stop`         |  `capture-decisions.sh`     | Capture user decisions at end-of-turn            |
+| `PreCompact`   |  `prime-on-compact.sh`      | Surface critical context before Claude compacts  |
 
 ---
 
 ## 8. Project Info
 
-### a. Troubleshooting
+### a. Limitations
 
-| Symptom                  | Fix                                                                         |
-| ------------------------ | --------------------------------------------------------------------------- |
-| Tools missing            | Re-run `install.sh`                                                         |
-| Search empty             | Rebuild index: `easymem rebuild`                                            |
-| Vector results missing   | Check `model2vec` in venv; re-run `install.sh` without `--no-vector`        |
-| Graph too large          | Raise `decay_threshold` or run maintenance                                  |
-| Agent asks permission    | Re-run `setup-project.sh` — refreshes CLAUDE.md bridge instructions         |
-| Maintenance stuck        | Delete `.easymem/.last-maintenance`                                         |
+- **🔍 TS / JS / Go / Rust / Ruby extractors are regex-based.** They cover common patterns but miss esoteric forms (computed exports, conditional imports, macros). Python is AST-based and exact.
+- **📉 LongMemEval-S `single-session-preference` category sits at 0.60** (the other five categories all ≥ 0.94). Short attribute-style queries against many similar sessions are the failure mode.
+- **💾 Full 19,195-session global LongMemEval-S** OOMs a typical laptop's vector-index bootstrap. The per-query protocol (the dataset paper's standard) is what produces the published numbers.
+- **🔗 No multi-device sync.** Local-first is a feature, not a limitation — but if you want cross-machine memory, this isn't the tool.
 
-### b. Known Limitations
+### b. Troubleshooting
 
-- **Lexical + static embeddings** — no live inference; semantic recall bounded by the chosen model2vec checkpoint.
-- **No read locking** — concurrent reads see the prior atomic snapshot; mid-maintenance partial state is invisible.
-- **ASCII name splitting** — CJK/non-Latin merges on exact match only.
-- **Single machine** — no automatic sync; use `./export-easymem.sh` + `./import-easymem.sh` for portable JSON bundle moves.
-- **Engine ceilings** (hardcoded in `semantic_server/config.py`) — graph ≤50MB · ≤100K entities · 50MB combined cache · 10K LRU recall · 20 obs/entity cached · 256 embed dim.
+| Symptom                          | Cause                                    | Fix                                                                  |
+| -------------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
+| 🔍 `easymem: command not found`     | PATH not updated                         | `export PATH="$HOME/.claude/easymem-bin:$PATH"`                      |
+| 📭 Empty search results             | Index stale                              | `easymem rebuild --rebuild-now`                                      |
+| 📁 Search returns chat but not code | Code-stamp not refreshed                 | `easymem index-code .`                                               |
+| 🪝 Hooks firing twice               | Plugin AND `install.sh` both registered  | Re-run `install.sh` — it auto-skips hooks when the plugin is present |
 
 ### c. Platform & License
 
-macOS (ARM64/x86) · Linux (x86/ARM) · Windows via WSL (native: no `fcntl`).
+macOS · Linux · Windows via WSL (native install has no `fcntl`).
 
-**License**: [MIT](LICENSE)
+License: MIT. See [LICENSE](LICENSE).

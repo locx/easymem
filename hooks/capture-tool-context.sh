@@ -11,7 +11,8 @@
 [ -d "${CLAUDE_PROJECT_DIR}/.easymem" ] || exit 0
 [ -n "${CLAUDE_SESSION_ID:-}" ] || exit 0
 
-EASYMEM_PY="$(cat "${HOME}/.claude/easymem/.venv-python" 2>/dev/null || echo python3)"
+EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
+EASYMEM_PY="$(cat "$EM_ROOT/.venv-python" 2>/dev/null || echo python3)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
 
 EASYMEM_DIR="${CLAUDE_PROJECT_DIR}/.easymem"

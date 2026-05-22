@@ -5,6 +5,7 @@ so search returns code alongside conversation memory.
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 
@@ -52,6 +53,16 @@ _TS_IMPORT = re.compile(
 )
 _TS_DOCSTRING = re.compile(r"^\s*/\*\*\s*(.*?)\s*\*/", re.DOTALL)
 
+# why: TS re-exports — `export { foo } from "./mod"` exposes foo AND counts
+# as an import of "./mod".
+_TS_REEXPORT = re.compile(
+    r"^\s*export\s*\{\s*([^}]+)\s*\}\s*from\s*['\"]([^'\"]+)['\"]",
+    re.MULTILINE,
+)
+
+# why: TS aliased exports (`export { foo as bar }`) expose `bar`, not `foo`.
+_TS_EXPORT_ALIAS = re.compile(r"\b([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)")
+
 _GO_FUNC = re.compile(
     r"^func\s+(?:\([^)]+\)\s+)?([A-Za-z_]\w*)", re.MULTILINE,
 )
@@ -84,22 +95,63 @@ def _first_match_group(rx: re.Pattern, text: str, default: str = "") -> str:
 
 
 def _extract_python(text: str) -> dict:
-    exports = [m.group(1) for m in _PY_DEF_OR_CLASS.finditer(text)
-               if not m.group(1).startswith("_")]
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {"exports": [], "imports": [], "docstring": "", "kinds": [],
+                "doc_lines": []}
+    exports: list[str] = []
+    kinds: list[str] = []
     imports: list[str] = []
-    for m in _PY_IMPORT.finditer(text):
-        imports.append(m.group(1) or m.group(2))
-    doc = _first_match_group(_PY_DOCSTRING, text)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                exports.append(node.name)
+                kinds.append("function")
+        elif isinstance(node, ast.ClassDef):
+            if not node.name.startswith("_"):
+                exports.append(node.name)
+                kinds.append("class")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if node.level:
+                mod = ("." * node.level) + mod
+            imports.append(mod)
+    doc = ast.get_docstring(tree) or ""
+    doc_lines = [ln.strip() for ln in doc.splitlines() if ln.strip()]
+    first = doc_lines[0] if doc_lines else ""
     return {"exports": exports, "imports": imports,
-            "docstring": doc.splitlines()[0] if doc else ""}
+            "docstring": first, "kinds": kinds,
+            "doc_lines": doc_lines}
 
 
 def _extract_ts(text: str) -> dict:
     exports = [m.group(1) for m in _TS_EXPORT.finditer(text)]
     imports = [m.group(1) for m in _TS_IMPORT.finditer(text)]
+    for m in _TS_REEXPORT.finditer(text):
+        clause, src = m.group(1), m.group(2)
+        imports.append(src)
+        for piece in clause.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            alias = _TS_EXPORT_ALIAS.search(piece)
+            if alias:
+                exports.append(alias.group(2))
+            else:
+                exports.append(piece)
+    # why: ts module JSDoc is /** ... */ — strip leading `*` per line.
     doc = _first_match_group(_TS_DOCSTRING, text)
+    doc_lines = [ln.strip().lstrip("*").strip()
+                 for ln in doc.splitlines() if ln.strip()]
+    first = doc_lines[0] if doc_lines else ""
     return {"exports": exports, "imports": imports,
-            "docstring": doc.splitlines()[0] if doc else ""}
+            "docstring": first,
+            "kinds": ["function"] * len(exports),
+            "doc_lines": doc_lines}
 
 
 def _extract_go(text: str) -> dict:
@@ -110,19 +162,22 @@ def _extract_go(text: str) -> dict:
             s = line.strip().strip('"').strip()
             if s and not s.startswith("//"):
                 imports.append(s)
-    return {"exports": exports, "imports": imports, "docstring": ""}
+    return {"exports": exports, "imports": imports, "docstring": "",
+            "kinds": ["function"] * len(exports), "doc_lines": []}
 
 
 def _extract_rust(text: str) -> dict:
     exports = [m.group(1) for m in _RUST_PUB.finditer(text)]
     imports = [m.group(1) for m in _RUST_USE.finditer(text)]
-    return {"exports": exports, "imports": imports, "docstring": ""}
+    return {"exports": exports, "imports": imports, "docstring": "",
+            "kinds": ["function"] * len(exports), "doc_lines": []}
 
 
 def _extract_ruby(text: str) -> dict:
     exports = [m.group(1) for m in _RUBY_DEF.finditer(text)]
     imports = [m.group(1) for m in _RUBY_REQUIRE.finditer(text)]
-    return {"exports": exports, "imports": imports, "docstring": ""}
+    return {"exports": exports, "imports": imports, "docstring": "",
+            "kinds": ["function"] * len(exports), "doc_lines": []}
 
 
 _EXTRACTORS = {
@@ -137,8 +192,10 @@ _EXTRACTORS = {
 def extract(text: str, lang: str) -> dict:
     fn = _EXTRACTORS.get(lang)
     if not fn:
-        return {"exports": [], "imports": [], "docstring": ""}
+        return {"exports": [], "imports": [], "docstring": "",
+                "kinds": [], "doc_lines": []}
     return fn(text)
+
 
 
 from pathlib import Path
@@ -270,7 +327,10 @@ def _build_entity(sf: ScannedFile, now_iso: str) -> dict:
         obs.append(f"export: {name}")
     for imp in info["imports"][:50]:
         obs.append(f"import: {imp}")
-    if info["docstring"]:
+    if info.get("doc_lines"):
+        for line in info["doc_lines"][:20]:  # cap to keep entities readable
+            obs.append(f"doc: {line}")
+    elif info["docstring"]:
         obs.append(f"module-doc: {info['docstring']}")
     return {
         "name": f"file:{sf.rel_path}",
@@ -278,6 +338,35 @@ def _build_entity(sf: ScannedFile, now_iso: str) -> dict:
         "observations": obs,
         "_source": _CODE_SOURCE_PREFIX + now_iso,
     }
+
+
+def _build_symbol_entities(sf: ScannedFile, now_iso: str) -> list[dict]:
+    info = extract(sf.text, sf.lang)
+    out: list[dict] = []
+    for name, kind in zip(info["exports"], info.get("kinds") or []):
+        out.append({
+            "name": f"{kind}:{sf.rel_path}::{name}",
+            "entityType": kind,
+            "observations": [
+                f"lang: {sf.lang}",
+                f"defined-in: {sf.rel_path}",
+                f"name: {name}",
+            ],
+            "_source": _CODE_SOURCE_PREFIX + now_iso,
+        })
+    return out
+
+
+def _build_defined_in_relations(sf: ScannedFile) -> list[dict]:
+    info = extract(sf.text, sf.lang)
+    rels: list[dict] = []
+    for name, kind in zip(info["exports"], info.get("kinds") or []):
+        rels.append({
+            "from": f"{kind}:{sf.rel_path}::{name}",
+            "to": f"file:{sf.rel_path}",
+            "relationType": "defined_in",
+        })
+    return rels
 
 
 def _build_relations(sf: ScannedFile, project_root: str) -> list[dict]:
@@ -311,7 +400,11 @@ def index_project(memory_dir: str, project_root: str,
         ent = _build_entity(sf, now_iso)
         new_entities.append(ent)
         seen_names.add(ent["name"])
+        sym_ents = _build_symbol_entities(sf, now_iso)
+        new_entities.extend(sym_ents)
+        seen_names.update(e["name"] for e in sym_ents)
         new_rels.extend(_build_relations(sf, project_root))
+        new_rels.extend(_build_defined_in_relations(sf))
 
     graph_path = os.path.join(memory_dir, "graph.jsonl")
     raw_entities, raw_rels, _ = partition_graph(graph_path)
@@ -319,11 +412,13 @@ def index_project(memory_dir: str, project_root: str,
     # why: use raw partition (not load_graph_entities) to preserve _source and
     # other metadata that load_graph_entities strips — losing _source breaks
     # session tagging in search results.
+    # why: indexer owns every entity it emits — file:* AND function:* AND class:*.
+    OWNED_PREFIXES = ("file:", "function:", "class:")
     kept: dict[str, dict] = {}
     removed = 0
     for obj in raw_entities:
         name = obj.get("name", "")
-        if name.startswith("file:"):
+        if any(name.startswith(p) for p in OWNED_PREFIXES):
             if name not in seen_names:
                 removed += 1
                 continue
@@ -333,19 +428,23 @@ def index_project(memory_dir: str, project_root: str,
     for ent in new_entities:
         kept[ent["name"]] = {k: v for k, v in ent.items() if k != "name"}
 
-    # why: drop import relations pointing at swept entities.
+    # why: drop all owned relation types so they can be rebuilt fresh.
+    _OWNED_REL_TYPES = ("imports", "defined_in")
     kept_rels: list[dict] = []
     for r in raw_rels:
-        if r.get("relationType") == "imports":
+        if r.get("relationType") in _OWNED_REL_TYPES:
             continue
         kept_rels.append({k: v for k, v in r.items() if k != "type"})
     kept_rels.extend(new_rels)
 
     rewrite_graph(memory_dir, kept, kept_rels)
+    n_files = sum(1 for e in new_entities if e["name"].startswith("file:"))
+    n_symbols = len(new_entities) - n_files
     return {
-        "indexed": len(new_entities),
+        "indexed": n_files,
         "removed": removed,
         "relations": len(new_rels),
+        "symbols": n_symbols,
     }
 
 

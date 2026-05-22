@@ -116,7 +116,8 @@ end
 
 def test_unknown_lang_returns_empty():
     out = extract("anything", "other")
-    assert out == {"exports": [], "imports": [], "docstring": ""}
+    assert out == {"exports": [], "imports": [], "docstring": "",
+                   "kinds": [], "doc_lines": []}
 
 
 from semantic_server.code_index import resolve_import
@@ -268,7 +269,7 @@ def test_index_project_attaches_observations(tmp_path):
     assert "lang: python" in obs
     assert "export: login" in obs
     assert "export: Svc" in obs
-    assert any(o.startswith("module-doc: Auth helpers.") for o in obs)
+    assert any(o.startswith("doc: Auth helpers.") for o in obs)
     assert ent.get("_source", "").startswith("code:scan:")
 
 
@@ -381,3 +382,139 @@ def test_maintenance_skips_code_scan_when_fresh(tmp_path):
     )
     stamp_mtime_2 = (mem / "code-stamp").stat().st_mtime
     assert stamp_mtime_2 == stamp_mtime_1
+
+
+def test_python_ast_handles_decorators():
+    src = '''
+@staticmethod
+def helper(): pass
+
+@app.route("/x")
+async def login(): pass
+'''
+    out = extract(src, "python")
+    assert "login" in out["exports"]
+    assert "helper" in out["exports"]
+
+
+def test_python_ast_handles_multiline_docstring():
+    src = '''"""Auth module.
+
+Provides session helpers.
+"""
+def x(): pass
+'''
+    out = extract(src, "python")
+    assert "Auth module." in out["docstring"]
+
+
+def test_python_ast_handles_class_methods_not_exported():
+    src = '''
+class Service:
+    def method(self): pass
+
+def top(): pass
+'''
+    out = extract(src, "python")
+    assert "Service" in out["exports"]
+    assert "top" in out["exports"]
+    assert "method" not in out["exports"]
+
+
+def test_python_ast_invalid_source_returns_empty():
+    src = "def(\n"
+    out = extract(src, "python")
+    assert out == {"exports": [], "imports": [], "docstring": "", "kinds": [],
+                   "doc_lines": []}
+
+
+def test_ts_reexport():
+    src = 'export { login } from "./auth";\n'
+    out = extract(src, "ts")
+    assert "login" in out["exports"]
+    assert "./auth" in out["imports"]
+
+
+def test_ts_export_alias():
+    src = 'export { foo as bar } from "./mod";\n'
+    out = extract(src, "ts")
+    assert "bar" in out["exports"]
+
+
+def test_ts_default_export_named():
+    src = 'export default function login() {}\n'
+    out = extract(src, "ts")
+    assert "login" in out["exports"]
+
+
+def test_ts_default_export_anon():
+    src = 'export default function () {}\n'
+    out = extract(src, "ts")
+    # Anonymous default export contributes nothing nameable.
+    assert out["exports"] == []
+
+
+def test_index_project_emits_symbol_entities(tmp_path):
+    proj = tmp_path
+    mem = proj / ".easymem"
+    mem.mkdir()
+    (mem / "graph.jsonl").write_text("")
+    _w(proj / "auth.py",
+       '"""Auth helpers."""\ndef login(): pass\nclass Svc: pass\n')
+    index_project(str(mem), str(proj))
+    lines = [json.loads(ln) for ln in
+             (mem / "graph.jsonl").read_text().splitlines() if ln.strip()]
+    names = {ln["name"] for ln in lines if ln.get("type") == "entity"}
+    assert "file:auth.py" in names
+    assert "function:auth.py::login" in names
+    assert "class:auth.py::Svc" in names
+
+
+def test_index_project_emits_defined_in_relations(tmp_path):
+    proj = tmp_path
+    mem = proj / ".easymem"
+    mem.mkdir()
+    (mem / "graph.jsonl").write_text("")
+    _w(proj / "auth.py", "def login(): pass\n")
+    index_project(str(mem), str(proj))
+    lines = [json.loads(ln) for ln in
+             (mem / "graph.jsonl").read_text().splitlines() if ln.strip()]
+    rels = [ln for ln in lines
+            if ln.get("type") == "relation"
+            and ln.get("relationType") == "defined_in"]
+    assert any(r["from"] == "function:auth.py::login"
+               and r["to"] == "file:auth.py" for r in rels)
+
+
+def test_index_project_sweeps_symbol_entities(tmp_path):
+    proj = tmp_path
+    mem = proj / ".easymem"
+    mem.mkdir()
+    (mem / "graph.jsonl").write_text("")
+    f = _w(proj / "auth.py", "def login(): pass\n")
+    index_project(str(mem), str(proj))
+    f.write_text("def signout(): pass\n")
+    index_project(str(mem), str(proj))
+    lines = [json.loads(ln) for ln in
+             (mem / "graph.jsonl").read_text().splitlines() if ln.strip()]
+    names = {ln["name"] for ln in lines if ln.get("type") == "entity"}
+    assert "function:auth.py::signout" in names
+    assert "function:auth.py::login" not in names
+
+
+def test_index_project_emits_multi_line_doc_observations(tmp_path):
+    proj = tmp_path
+    mem = proj / ".easymem"
+    mem.mkdir()
+    (mem / "graph.jsonl").write_text("")
+    _w(proj / "auth.py",
+       '"""Auth module.\n\nValidates session tokens via JWT.\n'
+       'Refresh flow is in session.refresh().\n"""\ndef login(): pass\n')
+    index_project(str(mem), str(proj))
+    lines = [json.loads(ln) for ln in
+             (mem / "graph.jsonl").read_text().splitlines() if ln.strip()]
+    ent = next(ln for ln in lines if ln.get("name") == "file:auth.py")
+    obs = ent.get("observations") or []
+    doc_lines = [o for o in obs if o.startswith("doc: ")]
+    assert any("Validates session tokens via JWT" in o for o in doc_lines)
+    assert any("Refresh flow" in o for o in doc_lines)

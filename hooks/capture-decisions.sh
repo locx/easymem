@@ -26,7 +26,8 @@ touch "$MARKER"
 # Stamp session-start timestamp here (Stop hook) for next session's diff
 EASYMEM_DIR="${CLAUDE_PROJECT_DIR}/.easymem"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
-EASYMEM_PY="$(cat "${HOME}/.claude/easymem/.venv-python" 2>/dev/null || echo python3)"
+EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
+EASYMEM_PY="$(cat "$EM_ROOT/.venv-python" 2>/dev/null || echo python3)"
 LAST_START="${EASYMEM_DIR}/.last-session-start"
 python3 -c "import time; open('${LAST_START}','w').write(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))" 2>/dev/null || true
 
@@ -85,25 +86,24 @@ if [ -n "$NEW_HEAD" ] && [ "$NEW_HEAD" != "$(cat "$LAST_HEAD" 2>/dev/null)" ]; t
     echo "$NEW_HEAD" > "$LAST_HEAD"
 fi
 
-EM="$HOME/.claude/easymem/easymem"
 cat << MSG
 SESSION END — persist what you learned:
 ${ACTIVITY:+$ACTIVITY
 }
 1. DECISIONS: If you chose between approaches or made architectural
    calls, persist each now:
-     $EMdecide '{"title":"what was decided","rationale":"why this approach","alternatives":["rejected option -- reason"],"scope":"affected code area"}'
+     easymem decide '{"title":"what was decided","rationale":"why this approach","alternatives":["rejected option -- reason"],"scope":"affected code area"}'
 
 2. OUTCOMES: If you revisited a prior decision and saw it succeed or
    fail, close the loop:
-     $EMdecide '{"action":"resolve","title":"prior decision","outcome":"successful","lesson":"what we learned"}'
+     easymem decide '{"action":"resolve","title":"prior decision","outcome":"successful","lesson":"what we learned"}'
 
 3. WARNINGS: If you found gotchas, fragile code, or foot-guns:
-     $EMwrite '{"entities":[{"name":"filename.py","entityType":"file-warning","observations":["[WARNING] description"]}]}'
+     easymem write '{"entities":[{"name":"filename.py","entityType":"file-warning","observations":["[WARNING] description"]}]}'
 
 4. PATTERNS: If you discovered reusable knowledge (conventions,
    integration points, API quirks), persist as entities + relations:
-     $EMwrite '{"entities":[...],"relations":[...]}'
+     easymem write '{"entities":[...],"relations":[...]}'
 
 Skip any that don't apply. Only persist what's genuinely useful.
 MSG

@@ -72,8 +72,12 @@ def _usage():
         "Changes since last session\n"
         "  aliases <op> [args]     "
         "Manage synonym groups (add|list|remove)\n"
+        "  slots <op> [args]       "
+        "Manage pinned slots (get|set|list)\n"
         "  index-code [PATH]       "
         "Index project source files into the graph\n"
+        "  nudge suppress          "
+        "Stop SessionStart nudges for the current project\n"
         "\nFlags:\n"
         "  --easymem-dir DIR        "
         "Override memory directory\n"
@@ -706,6 +710,51 @@ def _run_aliases(memory_dir, extra_args):
     return {"error": f"unknown aliases op '{op}'"}
 
 
+def _run_slots(memory_dir, extra_args):
+    from semantic_server.slots import (
+        SLOT_KEYS, get_slot, set_slot, list_slots,
+    )
+    if not extra_args:
+        return {"error": "usage: slots <get|set|list> [args]"}
+    op = extra_args[0]
+    rest = extra_args[1:]
+    if op == "list":
+        return {"slots": list_slots(memory_dir)}
+    if op == "get" and rest:
+        return {"key": rest[0], "value": get_slot(memory_dir, rest[0])}
+    if op == "set" and len(rest) >= 2:
+        try:
+            set_slot(memory_dir, rest[0], " ".join(rest[1:]))
+        except ValueError as exc:
+            return {"error": str(exc), "valid_keys": list(SLOT_KEYS)}
+        return {"ok": True, "key": rest[0]}
+    return {"error": f"unknown slots op '{op}' or missing args"}
+
+
+# --- Nudge suppression ---
+
+def _cmd_nudge(extra_args):
+    if not extra_args or extra_args[0] != "suppress":
+        print(json.dumps({"error": "usage: nudge suppress"}, indent=2))
+        return
+    import hashlib
+    project = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    project = os.path.realpath(project)
+    h = hashlib.md5(project.encode("utf-8")).hexdigest()
+    state_dir = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME")
+        or os.path.join(os.path.expanduser("~"), ".config"),
+        "easymem", "nudge",
+    )
+    os.makedirs(state_dir, exist_ok=True)
+    marker = os.path.join(state_dir, f"{h}.suppress")
+    open(marker, "w").close()
+    print(json.dumps(
+        {"ok": True, "suppressed": project, "marker": marker},
+        indent=2,
+    ))
+
+
 # --- Code index ---
 
 def _cmd_index_code(args, memory_dir):
@@ -714,6 +763,7 @@ def _cmd_index_code(args, memory_dir):
     result = index_project(memory_dir, project_root)
     print(
         f"indexed: {result['indexed']} files, "
+        f"{result['symbols']} symbols, "
         f"removed: {result['removed']} stale, "
         f"relations: {result['relations']}"
     )
@@ -957,6 +1007,12 @@ def main():
 
     tool_args = _parse_tool_args(tool_name, extra_args)
 
+    # why: nudge runs BEFORE bootstrap — its whole point is to opt out of
+    # auto-creating .easymem/ in the project.
+    if tool_name == "nudge":
+        _cmd_nudge(extra_args)
+        return
+
     if not (tool_name in _READ_ONLY_CMDS and os.path.isdir(memory_dir)):
         was_missing = not os.path.isdir(memory_dir)
         from semantic_server.bootstrap import bootstrap
@@ -1004,6 +1060,11 @@ def main():
 
     if tool_name == "aliases":
         result = _run_aliases(memory_dir, extra_args)
+        print(json.dumps(result, indent=2))
+        return
+
+    if tool_name == "slots":
+        result = _run_slots(memory_dir, extra_args)
         print(json.dumps(result, indent=2))
         return
 

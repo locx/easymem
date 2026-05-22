@@ -1,0 +1,19 @@
+{
+  "name": "easymem",
+  "owner": {
+    "name": "Lokesh Chauhan",
+    "url": "https://github.com/locx"
+  },
+  "plugins": [
+    {
+      "name": "easymem",
+      "source": {
+        "source": "github",
+        "repo": "locx/easymem"
+      },
+      "description": "Local-first knowledge-graph memory + code-structure indexer for Claude Code.",
+      "category": "memory",
+      "tags": ["memory", "knowledge-graph", "code-search", "local-first"]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "easymem",
+  "displayName": "easymem",
+  "version": "0.1.0",
+  "description": "Local-first knowledge-graph memory + code-structure indexer for Claude Code. Indexes your chat history and your codebase into the same hybrid retrieval graph.",
+  "author": {
+    "name": "Lokesh Chauhan",
+    "url": "https://github.com/locx"
+  },
+  "homepage": "https://github.com/locx/easymem",
+  "repository": "https://github.com/locx/easymem",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "knowledge-graph",
+    "code-search",
+    "local-first",
+    "tf-idf",
+    "vector-search"
+  ],
+  "hooks": "./hooks/hooks.json"
+}
