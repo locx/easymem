@@ -10,7 +10,7 @@ HOOK = str(
 
 
 def _seed(tmp_path):
-    mem = tmp_path / ".memory"
+    mem = tmp_path / ".easymem"
     mem.mkdir()
     (mem / "graph.jsonl").touch()
     return mem / "graph.jsonl"

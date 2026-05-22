@@ -10,7 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def test_full_pipeline(tmp_path):
-    mem = tmp_path / ".memory"
+    mem = tmp_path / ".easymem"
     mem.mkdir()
     graph = mem / "graph.jsonl"
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -34,7 +34,7 @@ def test_full_pipeline(tmp_path):
     assert (mem / "tfidf_index.json").exists()
 
     r = subprocess.run(
-        [sys.executable, str(REPO / "memory-cli.py"),
+        [sys.executable, str(REPO / "easymem-cli.py"),
          "search", "sign in handler"],
         cwd=tmp_path, capture_output=True, text=True,
     )
@@ -63,7 +63,7 @@ def test_full_pipeline(tmp_path):
     )
 
     r = subprocess.run(
-        [sys.executable, str(REPO / "memory-cli.py"),
+        [sys.executable, str(REPO / "easymem-cli.py"),
          "search", "broken-cmd"],
         cwd=tmp_path, capture_output=True, text=True,
     )

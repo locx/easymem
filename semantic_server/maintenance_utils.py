@@ -352,6 +352,80 @@ def detect_contradictions(entities_iter):
     return findings
 
 
+def _source_class(src: str) -> str:
+    """Coarse source classification used by the auto-resolver."""
+    if isinstance(src, str) and src.startswith("episode:"):
+        return "episode"
+    if isinstance(src, str) and src.startswith("user:"):
+        return "user"
+    return "other"
+
+
+def resolve_contradictions(entities, findings: dict):
+    """Auto-merge contradictions whose entity is episode-sourced.
+
+    For each conflicting pair `(i, j)` reported by the detector,
+    the higher-index observation is treated as newer (append-only
+    ordering) and kept verbatim; the older one is prefixed with
+    `superseded: ` in place. Entities sourced from `user:*` (or
+    anything other than `episode:*`) are left for human review and
+    remain in `findings`. Resolved entries are pruned from
+    `findings` so the sidecar only carries the unresolved remainder.
+
+    Returns (resolved_count, unresolved_count).
+    """
+    if isinstance(entities, dict):
+        index = entities
+    else:
+        index = {}
+        for ent in entities:
+            name = ent.get("name") if isinstance(ent, dict) else None
+            if isinstance(name, str) and name:
+                index[name] = ent
+
+    resolved = 0
+    unresolved = 0
+    keep = {}
+    for name, pairs in findings.items():
+        ent = index.get(name)
+        if ent is None or _source_class(ent.get("_source", "")) != "episode":
+            unresolved += len(pairs)
+            keep[name] = pairs
+            continue
+        obs = ent.get("observations", [])
+        offset = max(0, len(obs) - _MAX_OBS_PER_ENTITY)
+        superseded_idx = set()
+        for pair in pairs:
+            if len(pair) < 2:
+                continue
+            i, j = pair[0], pair[1]
+            # why: i,j index the detector's last-N window; bound them
+            # against that window, then translate to the obs index.
+            if not (0 <= i < _MAX_OBS_PER_ENTITY
+                    and 0 <= j < _MAX_OBS_PER_ENTITY):
+                continue
+            older = offset + min(i, j)
+            if 0 <= older < len(obs):
+                superseded_idx.add(older)
+        if not superseded_idx:
+            unresolved += len(pairs)
+            keep[name] = pairs
+            continue
+        new_obs = []
+        for k, o in enumerate(obs):
+            if k in superseded_idx and isinstance(o, str) \
+                    and not o.startswith("superseded: "):
+                new_obs.append("superseded: " + o)
+            else:
+                new_obs.append(o)
+        ent["observations"] = new_obs
+        resolved += len(superseded_idx)
+
+    findings.clear()
+    findings.update(keep)
+    return resolved, unresolved
+
+
 def write_contradictions_sidecar(memory_dir: str, findings: dict) -> None:
     """Atomic write or clear of .easymem/contradictions.json."""
     path = os.path.join(memory_dir, "contradictions.json")

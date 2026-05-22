@@ -6,11 +6,46 @@ import json
 import os
 import re
 from .stem import porter_stem
+from .synonyms import DEFAULT_SYNONYMS
 
 # Pre-compiled regexes (Unicode-aware)
 _RE_CAMEL = re.compile(r'([a-z\u00e0-\u00ff])([A-Z\u00c0-\u00df])')
 _RE_SEPS = re.compile(r'[_\-.\s]+')
 _RE_HEX_NOISE = re.compile(r'^[0-9a-f]{8,}$')
+
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_MONTH_ALT = "|".join(_MONTHS)
+_RE_DMY = re.compile(
+    rf"\b(\d{{1,2}})\s+({_MONTH_ALT})[,]?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+_RE_MDY = re.compile(
+    rf"\b({_MONTH_ALT})\s+(\d{{1,2}})[,]?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+_RE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
+
+def extract_date_stems(text: str) -> list[str]:
+    """Canonical 'date_YYYY_MM_DD' stems so DMY/MDY/ISO formats collide."""
+    if not isinstance(text, str) or not text:
+        return []
+    out: list[str] = []
+    for m in _RE_DMY.finditer(text):
+        mo = _MONTHS[m.group(2).lower()]
+        out.append(f"date_{m.group(3)}_{mo:02d}_{int(m.group(1)):02d}")
+    for m in _RE_MDY.finditer(text):
+        mo = _MONTHS[m.group(1).lower()]
+        out.append(f"date_{m.group(3)}_{mo:02d}_{int(m.group(2)):02d}")
+    for m in _RE_ISO.finditer(text):
+        out.append(
+            f"date_{m.group(1)}_{int(m.group(2)):02d}_{int(m.group(3)):02d}"
+        )
+    return out
 
 STOPWORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be",
@@ -31,44 +66,8 @@ STOPWORDS = frozenset({
     "but", "and", "or", "if", "then", "else", "also",
 })
 
-_SYNONYM_GROUPS = (
-    ('api', 'endpoint', 'route'),
-    ('async', 'asynchronous', 'concurrent'),
-    ('auth', 'authentication', 'authorize', 'authorization'),
-    ('auto', 'automobile', 'car', 'vehicle'),
-    ('cache', 'caching', 'memoize', 'memoization'),
-    ('cli', 'commandline'),
-    ('config', 'configuration', 'configure', 'settings', 'preferences'),
-    ('cred', 'credential', 'secret', 'apikey'),
-    ('db', 'database'),
-    ('del', 'delete', 'remove', 'drop'),
-    ('dep', 'dependency', 'package', 'library'),
-    ('deploy', 'deployment', 'release'),
-    ('doc', 'documentation', 'readme'),
-    ('env', 'environment'),
-    ('err', 'error', 'exception', 'fault', 'failure'),
-    ('fn', 'func', 'function', 'method', 'procedure'),
-    ('init', 'initialize', 'initialise', 'bootstrap', 'setup'),
-    ('log', 'logging', 'logger'),
-    ('migrate', 'migration'),
-    ('model', 'schema', 'table'),
-    ('msg', 'message', 'notification'),
-    ('perf', 'performance', 'latency', 'throughput'),
-    ('queue', 'broker', 'pubsub'),
-    ('repo', 'repository'),
-    ('req', 'request'),
-    ('resp', 'response'),
-    ('retry', 'backoff', 'resilience'),
-    ('svc', 'service', 'microservice'),
-    ('sync', 'synchronize', 'synchronise', 'replicate'),
-    ('test', 'testing', 'spec', 'unittest'),
-    ('ui', 'frontend', 'interface'),
-    ('val', 'validate', 'validation', 'verify', 'verification'),
-    ('ws', 'websocket', 'realtime'),
-)
-
-SYNONYM_MAP = {}
-for _group in _SYNONYM_GROUPS:
+SYNONYM_MAP: dict[str, str] = {}
+for _group in DEFAULT_SYNONYMS:
     canonical = _group[0]
     for _word in _group:
         SYNONYM_MAP[_word] = canonical

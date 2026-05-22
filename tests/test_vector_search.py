@@ -27,12 +27,15 @@ def tiny_index(tmp_path):
 
 
 def test_vector_search_returns_ranked_results(tiny_index):
+    # VECTOR_MIN_SIM floor drops near-zero/negative cosines so only the
+    # semantically relevant entity survives; SyncManager/Logger fall out.
     results = vector.vector_search(
         str(tiny_index), "login authentication", top_k=3,
     )
-    assert len(results) == 3
+    assert len(results) >= 1
     assert results[0][0] == "AuthService"
     assert all(isinstance(r[1], float) for r in results)
+    assert all(s > vector.VECTOR_MIN_SIM for _, s in results)
 
 
 def test_vector_search_empty_returns_empty(tmp_path):

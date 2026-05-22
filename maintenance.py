@@ -18,6 +18,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 
@@ -40,7 +41,10 @@ from semantic_server.text import (
     make_bigrams as _make_bigrams,
     filter_token as _filter_token,
     load_aliases,
+    extract_date_stems,
 )
+from semantic_server.graph import rewrite_graph
+from semantic_server.workflows import extract_workflows
 from semantic_server.maintenance_utils import (
     prune_entities,
     consolidate,
@@ -49,6 +53,7 @@ from semantic_server.maintenance_utils import (
     parse_iso_date,
     score_entity,
     detect_contradictions,
+    resolve_contradictions,
     write_contradictions_sidecar,
 )
 
@@ -128,38 +133,53 @@ def get_branch(cwd=None):
 
 
 def _tokenize_docs(entities, alias_map):
-    docs = {}
-    meta = {}
+    # why: per-observation docs so long entities don't dilute rare-term
+    # matches under cosine length normalization.
+    docs: dict = {}
+    meta: dict = {}
+    obs_to_entity: dict = {}
     df = Counter()
+
     def _expand(w):
         return alias_map.get(w, w)
 
+    def _piece_tokens(piece):
+        raw = [w for w in _RE_WORDS.findall(piece.lower())
+               if _filter_token(w)]
+        stemmed = [_expand(_stem(w)) for w in raw]
+        return (stemmed + _make_bigrams(stemmed)
+                + extract_date_stems(piece))
+
     for ent in entities:
         name = ent.get("name", "")
-        obs = ent.get("observations", [])
-        obs_strs = []
-        for o in obs:
-            if isinstance(o, str):
-                obs_strs.append(o)
-            else:
-                obs_strs.append(str(o))
+        obs_strs = [o if isinstance(o, str) else str(o)
+                    for o in (ent.get("observations") or [])]
         etype = ent.get("entityType", "")
-        words = []
-        for piece in chain((name, etype), obs_strs):
-            raw = [w for w in _RE_WORDS.findall(piece.lower()) if _filter_token(w)]
-            stemmed = [_expand(_stem(w)) for w in raw]
-            words.extend(stemmed)
-            words.extend(_make_bigrams(stemmed))
-        if words:
-            docs[name] = words
+        per_obs = [_piece_tokens(o) for o in obs_strs]
+        head = _piece_tokens(name) + _piece_tokens(etype)
+        # why: name + entityType attach to the first obs so they boost
+        # at least one doc; if no obs exist they become their own doc.
+        if per_obs:
+            per_obs[0] = head + per_obs[0]
+        elif head:
+            per_obs.append(head)
+        any_doc = False
+        for i, tokens in enumerate(per_obs):
+            if not tokens:
+                continue
+            doc_id = f"{name}#{i}"
+            docs[doc_id] = tokens
+            obs_to_entity[doc_id] = name
+            for w in set(tokens):
+                df[w] += 1
+            any_doc = True
+        if any_doc:
             meta[name] = {
                 "entityType": etype,
                 "observations": obs_strs[:5],
                 "_branch": ent.get("_branch", ""),
             }
-            for w in set(words):
-                df[w] += 1
-    return docs, meta, df
+    return docs, meta, df, obs_to_entity
 
 def build_tfidf_index(entities, easymem_dir):
     """Build TF-IDF index with magnitudes, postings, metadata.
@@ -180,7 +200,7 @@ def build_tfidf_index(entities, easymem_dir):
 
     # Load project-specific aliases for synonym expansion
     alias_map = load_aliases(easymem_dir)
-    docs, meta, df = _tokenize_docs(entities, alias_map)
+    docs, meta, df, obs_to_entity = _tokenize_docs(entities, alias_map)
 
     if not docs:
         _stale = os.path.join(easymem_dir, "tfidf_index.json")
@@ -191,7 +211,10 @@ def build_tfidf_index(entities, easymem_dir):
         return 0
 
     n_docs = len(docs)
-    min_df = 2 if n_docs > 50 else 1
+    # why: per-obs docs inflate n; threshold against entity count so rare
+    # terms appearing in a single small entity aren't pruned as noise.
+    n_entities = len(set(obs_to_entity.values()))
+    min_df = 2 if n_entities > 50 else 1
     # BM25-style IDF: boosts rare terms, floor at 0.1
     idf = {
         w: max(0.1, math.log(
@@ -223,7 +246,10 @@ def build_tfidf_index(entities, easymem_dir):
 
     del docs, df
 
-    meta = {k: v for k, v in meta.items() if k in vectors}
+    # why: meta keyed by entity; drop entities with no surviving doc.
+    surviving_entities = {obs_to_entity[d] for d in vectors}
+    meta = {k: v for k, v in meta.items() if k in surviving_entities}
+    obs_to_entity = {d: e for d, e in obs_to_entity.items() if d in vectors}
     n_indexed = len(vectors)
 
     index_path = os.path.join(easymem_dir, "tfidf_index.json")
@@ -249,6 +275,9 @@ def build_tfidf_index(entities, easymem_dir):
             f.write(',"metadata":')
             _dump(meta, f)
             del meta
+            f.write(',"obs_to_entity":')
+            _dump(obs_to_entity, f)
+            del obs_to_entity
             f.write(',"doc_count":')
             f.write(str(n_indexed))
             f.write(',"built":"')
@@ -376,7 +405,58 @@ def _compute_maintenance(entities, relations, project_dir, easymem_dir):
         entities, relations,
         min_merge_name_len=_cfg["MIN_MERGE_NAME_LEN"]
     )
+    entities, relations = _extract_workflows_inline(entities, relations)
+    # why: _neighbors is a transient derivation from relations; persisting
+    # it lets pruned neighbors linger across runs.
+    for e in entities:
+        if e.get("entityType") == "episode":
+            e.pop("_neighbors", None)
     return entities, relations, pruned, merged, recall_counts
+
+
+def _derive_episode_neighbors(entities, relations):
+    """Populate _neighbors on episode entities from in-memory relations.
+
+    why: real episodes (minted by hooks) don't carry _neighbors; the
+    extractor needs them to cluster, so derive once per run from the
+    relation graph rather than persisting a denormalized field.
+    """
+    # why: any relation endpoint counts as a neighbor regardless of
+    # relationType; if clustering becomes noisy, filter here (e.g. skip
+    # derived-from to avoid feedback loops with prior workflows).
+    adj = defaultdict(set)
+    for r in relations:
+        fr, to = r.get("from", ""), r.get("to", "")
+        if fr and to:
+            adj[fr].add(to)
+            adj[to].add(fr)
+    for e in entities:
+        if e.get("entityType") != "episode":
+            continue
+        n = adj.get(e.get("name", ""))
+        if n:
+            e["_neighbors"] = sorted(n)
+
+
+def _extract_workflows_inline(entities, relations):
+    """Mint workflow entities + derived-from relations from episode clusters."""
+    _derive_episode_neighbors(entities, relations)
+    ent_dict = {
+        e.get("name", ""): e for e in entities
+        if isinstance(e, dict) and e.get("name")
+    }
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_workflows, derived_rels = extract_workflows(ent_dict, now_iso=now_iso)
+    if not new_workflows:
+        return entities, relations
+    existing_names = {e.get("name", "") for e in entities}
+    for wf in new_workflows:
+        if wf["name"] in existing_names:
+            continue
+        entities.append({"type": "entity", **wf})
+    for r in derived_rels:
+        relations.append({"type": "relation", **r})
+    return entities, relations
 
 _MEM_BLOCK_START = "<!-- mem:start -->"
 _MEM_BLOCK_END = "<!-- mem:end -->"
@@ -561,7 +641,17 @@ def run(project_dir, force=False):
         )
 
         # Surfaces stale beliefs that decay alone won't catch.
+        # Same-entity contradictions on episode-sourced entities
+        # auto-resolve (newer obs wins); others fall to sidecar.
         findings = detect_contradictions(entities)
+        resolved, _ = resolve_contradictions(entities, findings)
+        if resolved:
+            ent_dict = {e["name"]: e for e in entities
+                        if isinstance(e, dict) and e.get("name")}
+            # why: rewrite_graph re-locks; a kill between the prior
+            # write_jsonl and here loses supersede prefixes, but the
+            # detector re-runs on next maintenance pass.
+            rewrite_graph(easymem_dir, ent_dict, relations)
         write_contradictions_sidecar(easymem_dir, findings)
 
         _promote_to_memory_md(project_dir, entities, recall_counts)

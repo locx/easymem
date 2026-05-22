@@ -28,6 +28,8 @@ env/
 # Memory
 .easymem/
 
-# Tests (local-only)
-tests/
-pytest.ini
+# Local-only (depend on bench/)
+bench
+docs
+tests/test_bench_smoke.py
+tests/test_locomo_smoke.py

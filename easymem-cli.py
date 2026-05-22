@@ -70,6 +70,8 @@ def _usage():
         "Rebuild TF-IDF index\n"
         "  diff                    "
         "Changes since last session\n"
+        "  aliases <op> [args]     "
+        "Manage synonym groups (add|list|remove)\n"
         "\nFlags:\n"
         "  --easymem-dir DIR        "
         "Override memory directory\n"
@@ -139,6 +141,16 @@ def _parse_positional(args):
             except ValueError:
                 print(
                     f"Warning: --depth requires an integer, got {args[i]!r}",
+                    file=sys.stderr,
+                )
+        elif arg == "--max-per-session" and i + 1 < len(args):
+            i += 1
+            try:
+                result["max_per_session"] = int(args[i])
+            except ValueError:
+                print(
+                    "Warning: --max-per-session requires an integer, "
+                    f"got {args[i]!r}",
                     file=sys.stderr,
                 )
         elif not arg.startswith("--"):
@@ -450,6 +462,7 @@ def _unified_search(a, memory_dir):
         query, memory_dir, top_k=top_k,
         branch=a.get("branch"),
         compact=a.get("compact", False),
+        max_per_session=a.get("max_per_session"),
     )
 
 
@@ -614,6 +627,81 @@ def _unified_status(a, memory_dir):
             ],
         }
     return stats
+
+
+# --- Aliases ---
+
+def _aliases_path(memory_dir):
+    return os.path.join(memory_dir, "aliases.json")
+
+
+def _read_aliases(memory_dir):
+    """Return list of groups; tolerate missing/corrupt files."""
+    try:
+        with open(_aliases_path(memory_dir), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    groups = data.get("groups", [])
+    return groups if isinstance(groups, list) else []
+
+
+def _write_aliases(memory_dir, groups):
+    os.makedirs(memory_dir, exist_ok=True)
+    path = _aliases_path(memory_dir)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"groups": groups}, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _cmd_aliases_add(memory_dir, words):
+    if len(words) < 2:
+        return {"error": "need canonical + at least one synonym"}
+    new_group = [w.lower().strip() for w in words if w.strip()]
+    canonical = new_group[0]
+    groups = _read_aliases(memory_dir)
+    # Replace any existing group with same canonical
+    groups = [g for g in groups
+              if not (isinstance(g, list) and g and
+                      str(g[0]).lower().strip() == canonical)]
+    groups.append(new_group)
+    _write_aliases(memory_dir, groups)
+    return {"added": new_group, "total_groups": len(groups)}
+
+
+def _cmd_aliases_list(memory_dir):
+    return {"groups": _read_aliases(memory_dir)}
+
+
+def _cmd_aliases_remove(memory_dir, canonical):
+    target = canonical.lower().strip()
+    groups = _read_aliases(memory_dir)
+    kept = [g for g in groups
+            if not (isinstance(g, list) and g and
+                    str(g[0]).lower().strip() == target)]
+    _write_aliases(memory_dir, kept)
+    return {"removed": target, "remaining": len(kept)}
+
+
+def _run_aliases(memory_dir, extra_args):
+    if not extra_args:
+        return {"error": "usage: aliases <add|list|remove> [args]"}
+    op = extra_args[0]
+    rest = extra_args[1:]
+    if op == "add":
+        return _cmd_aliases_add(memory_dir, rest)
+    if op == "list":
+        return _cmd_aliases_list(memory_dir)
+    if op == "remove":
+        if not rest:
+            return {"error": "remove requires <canonical>"}
+        return _cmd_aliases_remove(memory_dir, rest[0])
+    return {"error": f"unknown aliases op '{op}'"}
 
 
 # --- Diff ---
@@ -896,6 +984,11 @@ def main():
 
     if tool_name == "diff":
         _run_diff(memory_dir)
+        return
+
+    if tool_name == "aliases":
+        result = _run_aliases(memory_dir, extra_args)
+        print(json.dumps(result, indent=2))
         return
 
     # --- Commands that need semantic_server ---
