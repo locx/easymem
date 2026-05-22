@@ -35,6 +35,9 @@ except ImportError:
         sep = kw.get("separators", (",", ":"))
         _json.dump(obj, f, separators=sep)
 
+from semantic_server.code_index import (
+    index_project, code_scan_is_stale, touch_code_stamp,
+)
 from semantic_server.io_utils import iter_jsonl, partition_graph, write_jsonl, merge_pending
 from semantic_server.stem import stem_word as _stem
 from semantic_server.text import (
@@ -562,6 +565,15 @@ def _finalize_maintenance(easymem_dir, entities, recall_counts, pruned, merged):
                 except OSError:
                     pass
                 raise
+    # why: refresh code-structure entities before reindexing so
+    # code shows up in the same hybrid search ranking as memory.
+    project_dir = os.path.dirname(os.path.abspath(easymem_dir))
+    if code_scan_is_stale(easymem_dir, project_dir):
+        try:
+            index_project(easymem_dir, project_dir)
+            touch_code_stamp(easymem_dir)
+        except Exception as exc:
+            print(f"code scan skipped: {exc}", file=sys.stderr)
     rebuild_index(easymem_dir)
 
 

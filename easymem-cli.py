@@ -72,6 +72,8 @@ def _usage():
         "Changes since last session\n"
         "  aliases <op> [args]     "
         "Manage synonym groups (add|list|remove)\n"
+        "  index-code [PATH]       "
+        "Index project source files into the graph\n"
         "\nFlags:\n"
         "  --easymem-dir DIR        "
         "Override memory directory\n"
@@ -704,6 +706,20 @@ def _run_aliases(memory_dir, extra_args):
     return {"error": f"unknown aliases op '{op}'"}
 
 
+# --- Code index ---
+
+def _cmd_index_code(args, memory_dir):
+    from semantic_server.code_index import index_project
+    project_root = args[0] if args else os.getcwd()
+    result = index_project(memory_dir, project_root)
+    print(
+        f"indexed: {result['indexed']} files, "
+        f"removed: {result['removed']} stale, "
+        f"relations: {result['relations']}"
+    )
+    return 0
+
+
 # --- Diff ---
 
 def _run_diff(memory_dir):
@@ -989,6 +1005,10 @@ def main():
     if tool_name == "aliases":
         result = _run_aliases(memory_dir, extra_args)
         print(json.dumps(result, indent=2))
+        return
+
+    if tool_name == "index-code":
+        _cmd_index_code(extra_args, memory_dir)
         return
 
     # --- Commands that need semantic_server ---
