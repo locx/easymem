@@ -47,7 +47,7 @@ def _resolve_memory_dir(argv):
     return md, cleaned
 
 
-def _usage():
+def _usage(stream=sys.stderr, exit_code=1):
     print(
         "Usage: easymem [--easymem-dir DIR] "
         "<command> [args]\n"
@@ -78,6 +78,12 @@ def _usage():
         "Index project source files into the graph\n"
         "  nudge suppress          "
         "Stop SessionStart nudges for the current project\n"
+        "  export [OUTPUT]         "
+        "Export graph to a portable JSON bundle\n"
+        "  import <BUNDLE>         "
+        "Merge a bundle into the project graph\n"
+        "  help                    "
+        "Show this message\n"
         "\nFlags:\n"
         "  --easymem-dir DIR        "
         "Override memory directory\n"
@@ -93,9 +99,9 @@ def _usage():
         "Compact output (fewer observations)\n"
         "  --top-k N               "
         "Max results to return (default 5)",
-        file=sys.stderr,
+        file=stream,
     )
-    sys.exit(1)
+    sys.exit(exit_code)
 
 
 def _parse_positional(args):
@@ -115,6 +121,16 @@ def _parse_positional(args):
             return parsed if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, ValueError):
             return {}
+    # flag -> (result_key, cast); str never raises so warning path
+    # is int-only.
+    flag_spec = {
+        "--top-k": ("top_k", int),
+        "--mode": ("mode", str),
+        "--since": ("since", str),
+        "--type": ("entity_type", str),
+        "--depth": ("depth", int),
+        "--max-per-session": ("max_per_session", int),
+    }
     result = {}
     positionals = []
     i = 0
@@ -122,40 +138,14 @@ def _parse_positional(args):
         arg = args[i]
         if arg == "--compact":
             result["compact"] = True
-        elif arg == "--top-k" and i + 1 < len(args):
+        elif arg in flag_spec and i + 1 < len(args):
+            key, cast = flag_spec[arg]
             i += 1
             try:
-                result["top_k"] = int(args[i])
+                result[key] = cast(args[i])
             except ValueError:
                 print(
-                    f"Warning: --top-k requires an integer, got {args[i]!r}",
-                    file=sys.stderr,
-                )
-        elif arg == "--mode" and i + 1 < len(args):
-            i += 1
-            result["mode"] = args[i]
-        elif arg == "--since" and i + 1 < len(args):
-            i += 1
-            result["since"] = args[i]
-        elif arg == "--type" and i + 1 < len(args):
-            i += 1
-            result["entity_type"] = args[i]
-        elif arg == "--depth" and i + 1 < len(args):
-            i += 1
-            try:
-                result["depth"] = int(args[i])
-            except ValueError:
-                print(
-                    f"Warning: --depth requires an integer, got {args[i]!r}",
-                    file=sys.stderr,
-                )
-        elif arg == "--max-per-session" and i + 1 < len(args):
-            i += 1
-            try:
-                result["max_per_session"] = int(args[i])
-            except ValueError:
-                print(
-                    "Warning: --max-per-session requires an integer, "
+                    f"Warning: {arg} requires an integer, "
                     f"got {args[i]!r}",
                     file=sys.stderr,
                 )
@@ -1012,6 +1002,31 @@ def main():
     if tool_name == "nudge":
         _cmd_nudge(extra_args)
         return
+
+    if tool_name in ("help", "--help", "-h"):
+        _usage(sys.stdout, 0)
+        return
+
+    if tool_name in ("export", "import"):
+        import subprocess
+        project_dir = os.path.dirname(os.path.abspath(memory_dir)) \
+            or os.getcwd()
+        # why: .sh scripts honor EASYMEM_DIR if set; propagate the
+        # resolved path so --easymem-dir overrides reach them.
+        env = {**os.environ, "EASYMEM_DIR": memory_dir}
+        if tool_name == "export":
+            sh = os.path.join(_script_dir, "export-easymem.sh")
+            cmd = [sh, project_dir, *extra_args]
+        else:
+            if not extra_args:
+                print(
+                    "Usage: easymem import <bundle_file>",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            sh = os.path.join(_script_dir, "import-easymem.sh")
+            cmd = [sh, extra_args[0], project_dir]
+        sys.exit(subprocess.run(cmd, env=env).returncode)
 
     if not (tool_name in _READ_ONLY_CMDS and os.path.isdir(memory_dir)):
         was_missing = not os.path.isdir(memory_dir)

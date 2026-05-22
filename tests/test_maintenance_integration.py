@@ -3,7 +3,17 @@ import sys
 import time
 from pathlib import Path
 
+import maintenance
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_episode_decay_days():
+    assert maintenance.EPISODE_DECAY_DAYS == 14
+
+
+def test_episode_survival_recall():
+    assert maintenance.EPISODE_SURVIVAL_RECALL == 2
 
 
 def _setup_project(tmp_path):

@@ -14,7 +14,7 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd)" || {
     echo "ERROR: Directory not found: ${2:-.}"
     exit 1
 }
-EASYMEM_DIR="${PROJECT_DIR}/.easymem"
+EASYMEM_DIR="${EASYMEM_DIR:-${PROJECT_DIR}/.easymem}"
 GRAPH="${EASYMEM_DIR}/graph.jsonl"
 
 if [ ! -f "$BUNDLE" ]; then
