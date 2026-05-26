@@ -77,7 +77,7 @@ fi
 
 # ---- 4. Add .easymem/ to .gitignore ----
 if [ -f "${GITIGNORE}" ]; then
-    if grep -q '\.easymem/' "${GITIGNORE}" 2>/dev/null; then
+    if grep -qxF '.easymem/' "${GITIGNORE}" 2>/dev/null; then
         echo "  [skip] .easymem/ already in .gitignore"
     else
         printf '\n# Memory\n.easymem/\n' >> "${GITIGNORE}"

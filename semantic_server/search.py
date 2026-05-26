@@ -99,9 +99,10 @@ def _enrich_results(results, source, max_obs=MAX_CACHED_OBS):
             r["entityType"] = normalize_type(info.get("entityType", ""))
             r["_branch"] = info.get("_branch", "")
             r["observations"] = obs[:max_obs] if isinstance(obs, list) else []
-            # why: search() stamps _session on fused dicts before slicing;
-            # preserve it here since enrichment shares the same dict object.
-            if "_session" not in r:
+            # why: fused stamps _session=None for schema stability; diversified
+            # rows fill it from src_map. Fall through to source-derived value
+            # only when neither path provided one.
+            if r.get("_session") is None:
                 r["_session"] = _session_from_source(info.get("_source", ""))
 
 
@@ -164,7 +165,10 @@ def _build_query_vector(query, idf, alias_map=None):
 
 def _get_candidates(query_keys, postings, vectors):
     if not postings:
-        return set(vectors.keys())
+        # why: a full-scan fallback masks a malformed/partial index and amplifies
+        # latency to O(N_docs * |query_vec|). Empty candidates surface the bug.
+        log_event("INDEX_NO_POSTINGS", "")
+        return set()
     # Sort postings smallest-first and intersect incrementally
     # for early short-circuit on broad queries
     relevant = [postings[w] for w in query_keys if w in postings]
@@ -173,13 +177,13 @@ def _get_candidates(query_keys, postings, vectors):
         return set()
     if len(relevant) == 1:
         return set(relevant[0])
-    candidates = set(relevant[0]) & set(relevant[1])
-    if not candidates:
-        # Fallback to union up to MAX_CANDIDATES
-        for pl in relevant:
-            candidates |= set(pl)
-            if len(candidates) >= MAX_CANDIDATES:
-                break
+    # why: pure intersection. The union-fallback flipped AND→OR on empty
+    # intersect and returned irrelevant docs as ranked matches.
+    candidates = set(relevant[0])
+    for pl in relevant[1:]:
+        candidates &= set(pl)
+        if not candidates:
+            break
     return candidates
 
 
@@ -348,13 +352,16 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
     current_entities = load_graph_entities(memory_dir)
     metadata = (idx or {}).get("metadata", {})
 
+    # why: top-normalize so the smooth branch-penalty curve uses a per-row
+    # signal; constant sim=0.5 made the penalty a flat constant.
+    top_rrf = max(scores.values(), default=1.0) or 1.0
     fused = []
     for name, rrf in scores.items():
         if name not in current_entities:
             continue
         eb = (metadata.get(name, {}).get("_branch", "")
               or current_entities.get(name, {}).get("_branch", ""))
-        boost = _branch_boost(eb, current_branch, 0.5)
+        boost = _branch_boost(eb, current_branch, rrf / top_rrf)
         rc = recall_counts.get(name, 0)
         adj = rrf * boost * (1.0 + _HEBBIAN_ALPHA * math.log1p(rc))
         fused.append({
@@ -362,6 +369,9 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
             "score": round(adj, 6),
             "raw_score": round(rrf, 6),
             "branch_boost": round(boost, 4),
+            # why: stamp _session uniformly so the response schema is stable
+            # whether or not diversification ran.
+            "_session": None,
         })
     fused.sort(key=lambda r: r["score"], reverse=True)
     if max_per_session:
@@ -402,6 +412,10 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
 
 def search_by_time(memory_dir, since=None, until=None, limit=20, branch_filter=None, entity_type=None):
     """Return entities within a time window, sorted by recency."""
+    # why: schema previously had no required field; calling with neither bound
+    # returned the whole graph (capped by limit), a non-obvious foot-gun.
+    if not since and not until:
+        return {"error": "at least one of since/until is required"}
     try: limit = min(max(int(limit), 1), MAX_TOP_K)
     except (ValueError, TypeError): limit = 20
     entities = load_graph_entities(memory_dir)

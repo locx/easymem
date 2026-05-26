@@ -18,4 +18,4 @@ RECALL_OUT=$(python3 "${SCRIPT_DIR}/smart_recall.py" \
 
 [ -z "$RECALL_OUT" ] && exit 0
 
-python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreCompact","additionalContext":"Memory snapshot (pre-compact):\n"+sys.argv[1]}}))' "$RECALL_OUT"
+printf '%s\n%s\n' 'Memory snapshot (pre-compact):' "$RECALL_OUT"

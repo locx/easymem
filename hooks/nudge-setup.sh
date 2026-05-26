@@ -7,7 +7,10 @@ EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
 # --- Guards ---
 [ -f "$EM_ROOT/maintenance.py" ] || exit 0
 [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
-[ -d "${CLAUDE_PROJECT_DIR}/.easymem" ] && exit 0
+# why: don't exit on .easymem present — auto-init and nudge branches need to
+# distinguish "first time" from "already set up" rather than skip together.
+HAS_EASYMEM=0
+[ -d "${CLAUDE_PROJECT_DIR}/.easymem" ] && HAS_EASYMEM=1
 
 # --- Project hash (realpath matches the CLI's os.path.realpath) ---
 _project_hash() {
@@ -63,7 +66,8 @@ SETUP_CMD=$(_locate_setup)
 
 # --- First encounter: auto-init via setup-project.sh ---
 # why: count file absent == first time; subsequent calls fall through to nudge.
-if [ ! -f "$COUNT_FILE" ] && [ -n "$SETUP_CMD" ] && [ -f "$SETUP_CMD" ]; then
+if [ "$HAS_EASYMEM" = "0" ] && [ ! -f "$COUNT_FILE" ] \
+        && [ -n "$SETUP_CMD" ] && [ -f "$SETUP_CMD" ]; then
     echo "EasyMem: first session in this project — initializing .easymem/ ..."
     if bash "$SETUP_CMD" "$CLAUDE_PROJECT_DIR"; then
         echo 1 > "$COUNT_FILE"
@@ -72,6 +76,9 @@ if [ ! -f "$COUNT_FILE" ] && [ -n "$SETUP_CMD" ] && [ -f "$SETUP_CMD" ]; then
     echo ""
     echo "(EasyMem auto-setup failed — manual instructions below.)"
 fi
+
+# why: already set up — stay quiet without dropping the rising-suppress branch.
+[ "$HAS_EASYMEM" = "1" ] && exit 0
 
 # --- Nudge with rising suppress hint ---
 COUNT=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))

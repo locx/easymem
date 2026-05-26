@@ -197,9 +197,11 @@ def handle_message(msg, memory_dir):
                 )
             except OSError:
                 pass
+            # why: include tool name so MCP clients can distinguish tool errors
+            # from transport-level errors without parsing free-form text.
             result = {
                 "error": exc_msg,
-                "results": [],
+                "tool": tool_name,
             }
 
         is_err = isinstance(result, dict) and "error" in result

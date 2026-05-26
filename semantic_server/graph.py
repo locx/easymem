@@ -125,6 +125,9 @@ def _handle_entity_entry(entities, obs_keys, obj):
     if not name:
         return
     if name not in entities and len(entities) >= MAX_ENTITY_COUNT:
+        # why: surface truncation so callers about to rewrite the graph can
+        # bail out instead of persisting the truncated snapshot to disk.
+        entity_cache["truncated"] = True
         return
     obs = obj.get("observations", [])
     if not isinstance(obs, list):
@@ -220,6 +223,9 @@ def _parse_graph_file(graph_path, start_offset=0, seed_obs_keys=None):
 
 def _do_full_parse(graph_path, mtime):
     """Full graph parse — populates both caches."""
+    # why: reset stale truncated flag from a prior parse; _handle_entity_entry
+    # will set it back to True if this parse also hits the cap.
+    entity_cache["truncated"] = False
     entities, relations, obs_keys, offset = _parse_graph_file(graph_path)
     if entities is None:
         clear_entity_cache()
@@ -540,8 +546,17 @@ def _build_rewrite_line(entry_type, name_or_r, info_or_none):
         return None
 
 
-def rewrite_graph(memory_dir, entities_dict, relations):
-    """Atomic rewrite: temp file + fsync + os.replace."""
+def rewrite_graph(memory_dir, entities_dict, relations, *, _lock_held=False):
+    """Atomic rewrite: temp file + fsync + os.replace.
+
+    _lock_held: caller already holds GraphLock — skip the inner acquire to
+    avoid fcntl.flock self-conflict across two fds in the same process.
+
+    Refuses to write when entity_cache marks the loaded set as truncated;
+    persisting a truncated snapshot would permanently drop entities past cap.
+    """
+    if entity_cache.get("truncated"):
+        raise OSError("refusing to rewrite from a truncated entity cache")
     graph_path = os.path.join(memory_dir, "graph.jsonl")
     tmp = graph_path + ".new"
     dropped = 0
@@ -576,13 +591,7 @@ def rewrite_graph(memory_dir, entities_dict, relations):
     if dropped > 0:
         sys.stderr.write(f"warn: rewrite_graph dropped {dropped} invalid lines\n")
 
-    with GraphLock(memory_dir) as lock:
-        if not lock.acquired:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise OSError("Graph lock timeout")
+    def _commit():
         try:
             os.replace(tmp, graph_path)
         except BaseException:
@@ -595,3 +604,16 @@ def rewrite_graph(memory_dir, entities_dict, relations):
         # keep the on-disk index cache hot to avoid a costly reload.
         clear_entity_cache()
         clear_relation_cache()
+
+    if _lock_held:
+        _commit()
+        return
+
+    with GraphLock(memory_dir) as lock:
+        if not lock.acquired:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise OSError("Graph lock timeout")
+        _commit()

@@ -12,14 +12,22 @@ import sys
 
 def strip(path: str) -> bool:
     with open(path, encoding="utf-8") as f:
-        content = f.read()
+        # why: normalize CRLF so the "\n## " next-heading anchor matches
+        # on files saved with Windows line endings.
+        content = f.read().replace("\r\n", "\n")
     m = re.search(r"^## EasyMem \(Easy Memory\)", content, re.MULTILINE)
     if not m:
         return False
     start = m.start()
     end = content.find("\n## ", start + len(m.group(0)))
-    old_section = content[start:] if end < 0 else content[start:end]
-    new_content = content.replace(old_section, "").rstrip() + "\n"
+    # why: positional slice — str.replace would erase every verbatim
+    # occurrence (e.g. the same block quoted in a code fence).
+    if end < 0:
+        new_content = content[:start].rstrip() + "\n"
+    else:
+        new_content = (
+            content[:start].rstrip() + "\n" + content[end + 1:]
+        ).rstrip() + "\n"
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(new_content)

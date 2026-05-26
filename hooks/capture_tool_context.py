@@ -86,6 +86,21 @@ def _append_episode(graph_path: str, name: str,
             if lock_fd is not None:
                 lock_fd.close()
                 lock_fd = None
+    if _fcntl is not None and lock_fd is None:
+        # why: unlocked append races maintenance's read-rewrite-replace
+        # and loses the write; defer via .pending sidecar instead.
+        pending_path = graph_path + ".pending"
+        try:
+            with open(pending_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return
     try:
         with open(graph_path, "a", encoding="utf-8") as f:
             f.write(line)

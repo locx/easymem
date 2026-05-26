@@ -3,14 +3,39 @@ import argparse
 import json
 import os
 import sys
+import time
 
 _MEMORY_COMMANDS = {
     '$HOME/.claude/hooks/prime-easymem.sh',
     '$HOME/.claude/hooks/prime-on-compact.sh',
+    '$HOME/.claude/hooks/prime-slots.sh',
     '$HOME/.claude/hooks/capture-decisions.sh',
     '$HOME/.claude/hooks/nudge-setup.sh',
     '$HOME/.claude/hooks/capture-tool-context.sh',
 }
+
+_MAX_BACKUPS = 3
+
+
+def _rotate_backups(path):
+    # why: cap pre-mutation backups so settings.json doesn't grow .bak-* siblings
+    # forever on a repeated install/cleanup cycle.
+    prefix = os.path.basename(path) + '.bak-'
+    parent = os.path.dirname(path) or '.'
+    try:
+        siblings = [
+            f for f in os.listdir(parent) if f.startswith(prefix)
+        ]
+    except OSError:
+        return
+    siblings.sort()
+    # why: keep the newest _MAX_BACKUPS; siblings[:-N] is "all but the last N".
+    if len(siblings) > _MAX_BACKUPS:
+        for stale in siblings[:-_MAX_BACKUPS]:
+            try:
+                os.unlink(os.path.join(parent, stale))
+            except OSError:
+                pass
 
 
 def _load(path):
@@ -18,16 +43,31 @@ def _load(path):
         with open(path, encoding='utf-8') as f:
             return json.load(f)
     except (json.JSONDecodeError, ValueError):
-        print(f'  [warn] {path} is corrupt — backing up and recreating')
+        # why: returning {} would let _dump overwrite the user's whole
+        # settings.json with hooks-only — silent total loss.
         import shutil
         shutil.copy2(path, path + '.bak')
-        return {}
+        print(
+            f'  [error] {path} is corrupt — backed up to {path}.bak; '
+            f'inspect and re-run',
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except OSError as e:
         print(f'  [error] {path} — {e}', file=sys.stderr)
         sys.exit(1)
 
 
 def _dump(cfg, path):
+    # why: snapshot the prior valid state before mutation so an unintended
+    # rewrite is recoverable. Only the corrupt-load path was previously backed up.
+    if os.path.exists(path):
+        import shutil
+        try:
+            shutil.copy2(path, f'{path}.bak-{int(time.time())}')
+            _rotate_backups(path)
+        except OSError:
+            pass
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as f:

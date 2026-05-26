@@ -402,7 +402,9 @@ def _compute_maintenance(entities, relations, project_dir, easymem_dir):
     entities, relations, pruned = prune_entities(
         entities, relations, recall_counts,
         max_age_days=_cfg["MAX_AGE_DAYS"],
-        decay_threshold=_cfg["DECAY_THRESHOLD"]
+        decay_threshold=_cfg["DECAY_THRESHOLD"],
+        episode_decay_days=EPISODE_DECAY_DAYS,
+        episode_survival_recall=EPISODE_SURVIVAL_RECALL,
     )
     entities, relations, merged = consolidate(
         entities, relations,
@@ -457,7 +459,17 @@ def _extract_workflows_inline(entities, relations):
         if wf["name"] in existing_names:
             continue
         entities.append({"type": "entity", **wf})
+    # why: previously unconditional — repeat maintenance passes grew duplicate
+    # derived-from rows that only a following rewrite happened to dedup.
+    existing_rel_keys = {
+        (r.get("from", ""), r.get("to", ""), r.get("relationType", ""))
+        for r in relations
+    }
     for r in derived_rels:
+        key = (r.get("from", ""), r.get("to", ""), r.get("relationType", ""))
+        if key in existing_rel_keys:
+            continue
+        existing_rel_keys.add(key)
         relations.append({"type": "relation", **r})
     return entities, relations
 
@@ -743,6 +755,7 @@ def rebuild_index(easymem_dir):
 
 if __name__ == "__main__":
     import argparse
+    import signal as _signal
     _parser = argparse.ArgumentParser(description=__doc__)
     _parser.add_argument(
         "project_dir", nargs="?",
@@ -753,7 +766,21 @@ if __name__ == "__main__":
         "--force", action="store_true",
         help="Bypass 24h throttle.",
     )
+    _parser.add_argument(
+        "--timeout", type=int, default=0,
+        help="Abort after N seconds (POSIX SIGALRM; 0=disabled).",
+    )
     _ns = _parser.parse_args()
+    # why: portable wall-clock cap for backgrounded callers (macOS lacks
+    # GNU `timeout` by default). Windows lacks SIGALRM — skip there.
+    if _ns.timeout > 0 and hasattr(_signal, "SIGALRM"):
+        def _alarm_handler(_signum, _frame):
+            sys.stderr.write(
+                f"maintenance: timeout after {_ns.timeout}s\n"
+            )
+            os._exit(1)
+        _signal.signal(_signal.SIGALRM, _alarm_handler)
+        _signal.alarm(_ns.timeout)
     proj = _ns.project_dir
     _dry_run = _ns.dry_run
     mem_dir = os.path.join(proj, ".easymem")
@@ -770,7 +797,9 @@ if __name__ == "__main__":
             _, _, pruned = prune_entities(
                 list(ents), list(rels), rc,
                 max_age_days=_cfg["MAX_AGE_DAYS"],
-                decay_threshold=_cfg["DECAY_THRESHOLD"]
+                decay_threshold=_cfg["DECAY_THRESHOLD"],
+                episode_decay_days=EPISODE_DECAY_DAYS,
+                episode_survival_recall=EPISODE_SURVIVAL_RECALL,
             )
             _, _, merged = consolidate(
                 list(ents), list(rels),

@@ -7,7 +7,7 @@ import select
 import signal
 import sys
 import time
-import threading
+from contextlib import contextmanager
 
 from . import cache as _cache_mod
 from ._json import loads as _fast_loads
@@ -27,6 +27,7 @@ from .config import (
 from .bootstrap import bootstrap
 from .cache import index_cache
 from .graph import (
+    GraphLock,
     load_index,
     append_jsonl,
     invalidate_entity_cache_only,
@@ -51,7 +52,15 @@ _INDEX_DEBOUNCE_SECS = 0.5
 _last_mtime_seen = 0.0
 _last_mtime_time = 0.0
 
-_graph_lock = threading.Lock()
+@contextmanager
+def _strict_graph_lock(memory_dir):
+    # why: fcntl-based on .graph.lock so CLI/maintenance/hooks/append_jsonl
+    # writers all serialize against the server. The old threading.Lock here
+    # was in-process only and didn't see cross-process writers.
+    with GraphLock(memory_dir) as _lock:
+        if not _lock.acquired:
+            raise OSError("graph lock timeout")
+        yield
 
 
 def _shutdown_handler(signum, frame):
@@ -73,13 +82,18 @@ def _merge_pending(memory_dir):
     graph_path = os.path.join(memory_dir, "graph.jsonl")
 
     t0 = time.monotonic()
-    lines, _bytes = _merge_pending_impl(
-        memory_dir,
-        graph_path,
-        pending_path,
-        lock=_graph_lock,
-        invalidate_cb=_invalidate_both,
-    )
+    try:
+        lines, _bytes = _merge_pending_impl(
+            memory_dir,
+            graph_path,
+            pending_path,
+            lock=_strict_graph_lock(memory_dir),
+            invalidate_cb=_invalidate_both,
+        )
+    except OSError as exc:
+        # why: lock timeout — let the next tick retry rather than crash the loop.
+        _log.debug("merge_pending lock timeout: %s", exc)
+        return
     elapsed = time.monotonic() - t0
     if elapsed > _MERGE_TIME_BUDGET:
         _log.debug(

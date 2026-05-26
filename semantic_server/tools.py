@@ -449,6 +449,14 @@ def create_decision(args, memory_dir):
     obs, outcome, obs_warnings = _build_decision_obs(args)
 
     entity_name = f"{_DECISION_PREFIX}{title}"
+    # why: create_entities does not reject duplicate names — re-appending merges
+    # observations at load time and silently overwrites the prior Outcome line.
+    if entity_name in load_graph_entities(memory_dir):
+        return {
+            "error": f"decision '{title}' already exists",
+            "existing": entity_name,
+            "hint": "use update_decision_outcome",
+        }
     result = create_entities(
         [{
             "name": entity_name,

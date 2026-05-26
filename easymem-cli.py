@@ -127,9 +127,15 @@ def _parse_positional(args):
         "--top-k": ("top_k", int),
         "--mode": ("mode", str),
         "--since": ("since", str),
+        "--until": ("until", str),
         "--type": ("entity_type", str),
-        "--depth": ("depth", int),
+        # why: handlers read max_depth (graph mode) — the prior 'depth' key
+        # was silently dropped because nothing consumed it.
+        "--depth": ("max_depth", int),
         "--max-per-session": ("max_per_session", int),
+        "--direction": ("direction", str),
+        "--branch": ("branch_filter", str),
+        "--entity": ("entity", str),
     }
     result = {}
     positionals = []
@@ -160,13 +166,58 @@ def _parse_positional(args):
 # --- Pending sidecar merge ---
 
 def _merge_pending(memory_dir):
-    """Merge .pending sidecar into graph.jsonl via io_utils.merge_pending."""
+    """Hold .graph.lock during merge so hook appends can't race it."""
+    import time as _time
+    from contextlib import contextmanager
     from pathlib import Path
     from semantic_server.io_utils import merge_pending
+    try:
+        import fcntl as _fcntl
+    except ImportError:
+        _fcntl = None
     mem = Path(memory_dir)
     graph = mem / "graph.jsonl"
     pending = graph.with_suffix(".jsonl.pending")
-    merge_pending(mem, graph, pending, lock=None, invalidate_cb=None)
+
+    # why: most CLI invocations have no pending sidecar — skip lock+merge
+    # entirely so a busy server can't make every CLI command hang.
+    try:
+        if not pending.exists() or pending.stat().st_size == 0:
+            return
+    except OSError:
+        return
+
+    @contextmanager
+    def _lock():
+        # why: non-blocking with a short deadline so a busy server holding
+        # the lock can't stall the CLI indefinitely.
+        if _fcntl is None:
+            yield
+            return
+        with open(mem / ".graph.lock", "a") as lf:
+            deadline = _time.monotonic() + 5.0
+            delay = 0.05
+            while True:
+                try:
+                    _fcntl.flock(
+                        lf.fileno(),
+                        _fcntl.LOCK_EX | _fcntl.LOCK_NB,
+                    )
+                    break
+                except (IOError, OSError):
+                    if _time.monotonic() >= deadline:
+                        return
+                    _time.sleep(delay)
+                    delay = min(delay * 2, 0.5)
+            try:
+                yield
+            finally:
+                try:
+                    _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+    merge_pending(mem, graph, pending, lock=_lock(), invalidate_cb=None)
 
 
 # --- Doctor ---

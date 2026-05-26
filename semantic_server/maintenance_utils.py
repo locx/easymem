@@ -71,7 +71,11 @@ def score_entity(entity, now_ts, recall_counts=None, cutoff_str=None, max_age_da
 
     return score
 
-def prune_entities(entities, relations, recall_counts=None, max_age_days=90, decay_threshold=0.1):
+def prune_entities(
+    entities, relations, recall_counts=None,
+    max_age_days=90, decay_threshold=0.1,
+    episode_decay_days=14, episode_survival_recall=2,
+):
     """Remove low-score entities with zero inbound relations."""
     has_inbound = {r.get("to", "") for r in relations}
     now_ts = time.time()
@@ -81,15 +85,10 @@ def prune_entities(entities, relations, recall_counts=None, max_age_days=90, dec
     pruned_names = set()
     kept = []
     for e in entities:
-        # Episode decay: unrecalled episodes prune past EPISODE_DECAY_DAYS
+        # Episode decay: unrecalled episodes prune past episode_decay_days
         if e.get("entityType") == "episode":
-            try:
-                from maintenance import (
-                    EPISODE_DECAY_DAYS, EPISODE_SURVIVAL_RECALL,
-                )
-            except ImportError:
-                EPISODE_DECAY_DAYS = 14
-                EPISODE_SURVIVAL_RECALL = 2
+            EPISODE_DECAY_DAYS = episode_decay_days
+            EPISODE_SURVIVAL_RECALL = episode_survival_recall
             ts = e.get("_updated") or e.get("_created", "")
             if ts:
                 try:

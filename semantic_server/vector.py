@@ -58,7 +58,11 @@ def embed_entities(entities: dict) -> tuple[list[str], np.ndarray]:
         obs = info.get("observations") or []
         obs_str = " | ".join(str(o) for o in obs[:5])
         prefix = f"{etype}: " if etype else ""
-        text = f"{prefix}{name}\n{obs_str}"[:512]
+        # why: budget the header separately so long symbol names don't eat the
+        # full 512-char window and leave zero room for observations.
+        header = f"{prefix}{name}"[:256]
+        remaining = max(0, 512 - len(header) - 1)
+        text = f"{header}\n{obs_str[:remaining]}"
         names.append(name)
         texts.append(text)
     if not texts:

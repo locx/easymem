@@ -311,7 +311,7 @@ def scan_project(root, excludes: frozenset[str] | set[str] | None = None):
 
 from datetime import datetime, timezone
 
-from .graph import rewrite_graph
+from .graph import GraphLock, rewrite_graph
 from .io_utils import partition_graph
 
 
@@ -407,37 +407,53 @@ def index_project(memory_dir: str, project_root: str,
         new_rels.extend(_build_defined_in_relations(sf))
 
     graph_path = os.path.join(memory_dir, "graph.jsonl")
-    raw_entities, raw_rels, _ = partition_graph(graph_path)
+    # why: lock across partition+rewrite so a concurrent server/maintenance
+    # append between the two operations can't be clobbered.
+    with GraphLock(memory_dir) as _lock:
+        if not _lock.acquired:
+            return {
+                "indexed": 0,
+                "removed": 0,
+                "relations": 0,
+                "symbols": 0,
+                "error": "graph lock timeout",
+            }
+        raw_entities, raw_rels, _ = partition_graph(graph_path)
 
-    # why: use raw partition (not load_graph_entities) to preserve _source and
-    # other metadata that load_graph_entities strips — losing _source breaks
-    # session tagging in search results.
-    # why: indexer owns every entity it emits — file:* AND function:* AND class:*.
-    OWNED_PREFIXES = ("file:", "function:", "class:")
-    kept: dict[str, dict] = {}
-    removed = 0
-    for obj in raw_entities:
-        name = obj.get("name", "")
-        if any(name.startswith(p) for p in OWNED_PREFIXES):
-            if name not in seen_names:
-                removed += 1
+        # why: raw partition (not load_graph_entities) preserves _source for
+        # session tagging; indexer owns every file:/function:/class: entity.
+        OWNED_PREFIXES = ("file:", "function:", "class:")
+        kept: dict[str, dict] = {}
+        removed = 0
+        dropped_owned: set[str] = set()
+        for obj in raw_entities:
+            name = obj.get("name", "")
+            if any(name.startswith(p) for p in OWNED_PREFIXES):
+                if name not in seen_names:
+                    removed += 1
+                    dropped_owned.add(name)
+                    continue
+                # will be replaced by new_entities below
                 continue
-            # will be replaced by new_entities below
-            continue
-        kept[name] = {k: v for k, v in obj.items() if k != "name" and k != "type"}
-    for ent in new_entities:
-        kept[ent["name"]] = {k: v for k, v in ent.items() if k != "name"}
+            kept[name] = {
+                k: v for k, v in obj.items() if k != "name" and k != "type"
+            }
+        for ent in new_entities:
+            kept[ent["name"]] = {k: v for k, v in ent.items() if k != "name"}
 
-    # why: drop all owned relation types so they can be rebuilt fresh.
-    _OWNED_REL_TYPES = ("imports", "defined_in")
-    kept_rels: list[dict] = []
-    for r in raw_rels:
-        if r.get("relationType") in _OWNED_REL_TYPES:
-            continue
-        kept_rels.append({k: v for k, v in r.items() if k != "type"})
-    kept_rels.extend(new_rels)
+        # why: drop owned-type relations AND any inbound relation whose endpoint
+        # references an entity we just dropped — otherwise dangling refs leak.
+        _OWNED_REL_TYPES = ("imports", "defined_in")
+        kept_rels: list[dict] = []
+        for r in raw_rels:
+            if r.get("relationType") in _OWNED_REL_TYPES:
+                continue
+            if r.get("from") in dropped_owned or r.get("to") in dropped_owned:
+                continue
+            kept_rels.append({k: v for k, v in r.items() if k != "type"})
+        kept_rels.extend(new_rels)
 
-    rewrite_graph(memory_dir, kept, kept_rels)
+        rewrite_graph(memory_dir, kept, kept_rels, _lock_held=True)
     n_files = sum(1 for e in new_entities if e["name"].startswith("file:"))
     n_symbols = len(new_entities) - n_files
     return {

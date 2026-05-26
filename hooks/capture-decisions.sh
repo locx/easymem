@@ -23,13 +23,13 @@ fi
 
 touch "$MARKER"
 
-# Stamp session-start timestamp here (Stop hook) for next session's diff
+# why: LAST_START is the prior session's stop boundary; rewriting it
+# before the count below would zero out this session's activity number.
 EASYMEM_DIR="${CLAUDE_PROJECT_DIR}/.easymem"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
 EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
 EASYMEM_PY="$(cat "$EM_ROOT/.venv-python" 2>/dev/null || echo python3)"
 LAST_START="${EASYMEM_DIR}/.last-session-start"
-python3 -c "import time; open('${LAST_START}','w').write(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))" 2>/dev/null || true
 
 # Count session activity to calibrate prompt
 GRAPH="${EASYMEM_DIR}/graph.jsonl"
@@ -75,6 +75,10 @@ PYEOF
         fi
     fi
 fi
+
+# why: stamp AFTER the count above so the count sees the prior boundary;
+# env-var pattern avoids shell interpolation into the python -c source.
+LAST_START="$LAST_START" python3 -c "import os,time; open(os.environ['LAST_START'],'w').write(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))" 2>/dev/null || true
 
 NEW_HEAD=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "")
 LAST_HEAD="${EASYMEM_DIR}/.last-session-head"

@@ -147,8 +147,8 @@ fi
 # --- Step 5: Deploy hooks + wire settings.json ---
 echo "[5/5] Deploying hooks..."
 
-HOOKS=(prime-easymem.sh prime-on-compact.sh capture-decisions.sh
-       nudge-setup.sh capture-tool-context.sh
+HOOKS=(prime-easymem.sh prime-on-compact.sh prime-slots.sh
+       capture-decisions.sh nudge-setup.sh capture-tool-context.sh
        capture_tool_context.py smart_recall.py)
 for h in "${HOOKS[@]}"; do
     cp "${SCRIPT_DIR}/hooks/${h}" "${HOOKS_DIR}/${h}"
@@ -156,10 +156,15 @@ done
 chmod +x "${HOOKS_DIR}"/*.sh "${HOOKS_DIR}"/*.py
 echo "  [ok] ${#HOOKS[@]} hooks → ${HOOKS_DIR}/"
 
-# why: if the easymem plugin is installed, hook registration is owned by
-# the plugin manifest — avoid double-fire.
-if command -v claude >/dev/null 2>&1 \
-   && claude plugin list 2>/dev/null | grep -q "^easymem"; then
+# why: plugin already wires hooks via its manifest — avoid double-fire.
+# `claude plugin list` output format is undocumented, so check both.
+if [ -d "${CLAUDE_HOME}/plugins" ] \
+   && find "${CLAUDE_HOME}/plugins" -maxdepth 4 -type d \
+        -iname '*easymem*' 2>/dev/null | grep -q .; then
+    echo "  [skip] hooks (easymem plugin dir detected — plugin owns hook wiring)"
+    WIRE_HOOKS=0
+elif command -v claude >/dev/null 2>&1 \
+     && claude plugin list 2>/dev/null | grep -qi 'easymem'; then
     echo "  [skip] hooks (easymem plugin detected — plugin owns hook wiring)"
     WIRE_HOOKS=0
 fi
@@ -169,6 +174,7 @@ if [ $WIRE_HOOKS -eq 1 ]; then
     # Format: "<event> <hook-basename> <timeout>"
     HOOK_WIRING=(
         "SessionStart prime-easymem.sh 10"
+        "SessionStart prime-slots.sh 5"
         "SessionStart nudge-setup.sh 3"
         "PostToolUse capture-tool-context.sh 3"
         "Stop capture-decisions.sh 3"

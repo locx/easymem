@@ -87,7 +87,11 @@
           "type": "string",
           "description": "Filter to entities of this type (e.g. decision, component, file-warning, service)"
         }
-      }
+      },
+      "anyOf": [
+        {"required": ["since"]},
+        {"required": ["until"]}
+      ]
     }
   },
   {

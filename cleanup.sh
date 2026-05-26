@@ -178,7 +178,7 @@ import json, os, sys
 
 path = sys.argv[1]
 dry_run = sys.argv[2] == 'true'
-target = 'Bash($HOME/.claude/easymem/easymem *)'
+target = 'Bash($HOME/.claude/easymem-bin/easymem *)'
 
 try:
     with open(path, encoding='utf-8') as f:
@@ -203,20 +203,17 @@ if not allow:
 if not cfg.get('permissions'):
     cfg.pop('permissions', None)
 
-if cfg:
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=2)
-        f.write('\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-else:
-    os.unlink(path)
-    # Remove .claude/ if now empty
-    cdir = os.path.dirname(path)
-    if os.path.isdir(cdir) and not os.listdir(cdir):
-        os.rmdir(cdir)
+# why: even when cfg becomes empty, leave a `{}` file rather than unlinking —
+# other tools may rely on settings.json (and .claude/) as a sentinel.
+if not cfg:
+    cfg = {}
+tmp = path + '.tmp'
+with open(tmp, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, path)
 
 print('  \033[0;32m[removed]\033[0m easymem permission from .claude/settings.json')
 PYEOF
@@ -256,7 +253,7 @@ cleanup_global() {
     fi
 
     # 2. Remove deployed hook scripts
-    HOOKS=(prime-easymem.sh prime-on-compact.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
+    HOOKS=(prime-easymem.sh prime-on-compact.sh prime-slots.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
     for hook in "${HOOKS[@]}"; do
         if [ -e "${CLAUDE_HOME}/hooks/${hook}" ]; then
             if confirm "Remove hook ${hook}?"; then

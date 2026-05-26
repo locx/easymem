@@ -22,11 +22,14 @@ recall_path = ""
 recall_mtime = 0.0
 _last_recall_check = 0.0
 _recall_lock = threading.Lock()
+# why: on transient read error, preserve in-memory counts and disable flush —
+# resetting to {} then flushing would permanently wipe disk history.
+_load_failed = False
 
 
 def init_recall_state(memory_dir):
     """Load recall counts from sidecar file."""
-    global recall_counts, recall_path, recall_mtime
+    global recall_counts, recall_path, recall_mtime, _load_failed
     recall_path = os.path.join(
         memory_dir, "recall_counts.json"
     )
@@ -47,14 +50,18 @@ def init_recall_state(memory_dir):
                     if isinstance(k, str)
                     and isinstance(v, (int, float))
                 )
-        except (OSError, json.JSONDecodeError, ValueError):
+            _load_failed = False
+        except FileNotFoundError:
             recall_counts = OrderedDict()
             recall_mtime = 0.0
+            _load_failed = False
+        except (OSError, json.JSONDecodeError, ValueError):
+            _load_failed = True
 
 
 def maybe_reload_recall_counts():
     """Reload if file changed, using mtime+file-offset for last-writer-wins."""
-    global recall_mtime, _last_recall_check
+    global recall_mtime, _last_recall_check, _load_failed
     if not recall_path:
         return
     now = time.monotonic()
@@ -81,8 +88,9 @@ def maybe_reload_recall_counts():
                     if isinstance(k, str) and isinstance(v, (int, float)):
                         recall_counts[k] = v
             recall_mtime = mtime
+            _load_failed = False
         except (OSError, json.JSONDecodeError, ValueError):
-            pass
+            _load_failed = True
 
 
 def record_recalls(entity_names):
@@ -105,6 +113,9 @@ def flush_recall_counts():
     if not recall_path:
         with _recall_lock:
             recall_dirty = False
+        return
+    if _load_failed:
+        # why: refuse to overwrite disk while in-memory state is known-degraded.
         return
     if not recall_dirty:
         return

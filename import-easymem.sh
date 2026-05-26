@@ -35,9 +35,11 @@ if [ "$BUNDLE_SIZE" -gt 52428800 ]; then
 fi
 
 # Backup existing graph
+# why: timestamped — repeated imports must not clobber the prior backup.
 if [ -f "$GRAPH" ]; then
-    cp "$GRAPH" "${GRAPH}.pre-import.bak"
-    echo "Backed up existing graph to ${GRAPH}.pre-import.bak"
+    BACKUP="${GRAPH}.pre-import-$(date +%s).bak"
+    cp "$GRAPH" "$BACKUP"
+    echo "Backed up existing graph to ${BACKUP}"
 fi
 
 python3 - "$BUNDLE" "$GRAPH" << 'PYEOF'
@@ -187,6 +189,24 @@ for entry in import_entries:
         )
         skipped_invalid += 1
 
+# why: drop relations whose endpoints no longer exist in the merged set —
+# bundles can declare relations referencing entities that were validation-
+# rejected or never present, leaving dangling refs.
+merged_names = {
+    e.get('name', '') for e in existing
+    if e.get('type') == 'entity'
+}
+pruned_existing = []
+dropped_dangling = 0
+for e in existing:
+    if e.get('type') == 'relation':
+        if (e.get('from') not in merged_names
+                or e.get('to') not in merged_names):
+            dropped_dangling += 1
+            continue
+    pruned_existing.append(e)
+existing = pruned_existing
+
 # Write merged graph atomically
 tmp = graph_path + '.tmp.import'
 try:
@@ -211,5 +231,7 @@ print(f'  Relations: {added_r} added, '
       f'{skipped_r} duplicates skipped')
 if skipped_invalid:
     print(f'  Skipped {skipped_invalid} invalid entries')
+if dropped_dangling:
+    print(f'  Dropped {dropped_dangling} relations with missing endpoints')
 print(f'  Total entries now: {len(existing)}')
 PYEOF

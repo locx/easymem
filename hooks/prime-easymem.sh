@@ -21,16 +21,11 @@ if [ -f "$EM_ROOT/maintenance.py" ]; then
             mv -f "$ERR_LOG" "${ERR_LOG}.old" 2>/dev/null || true
         fi
     fi
-    # Background + wait; cap with `timeout` if available (macOS lacks coreutils).
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 python3 "$EM_ROOT/maintenance.py" \
-            "${CLAUDE_PROJECT_DIR}" 2>>"$ERR_LOG" &
-    else
-        python3 "$EM_ROOT/maintenance.py" \
-            "${CLAUDE_PROJECT_DIR}" 2>>"$ERR_LOG" &
-    fi
-    MAINT_PID=$!
-    wait "$MAINT_PID" 2>/dev/null || true
+    # why: fully backgrounded with a Python-side SIGALRM cap so macOS (no
+    # coreutils `timeout`) doesn't end up with unbounded background runs.
+    python3 "$EM_ROOT/maintenance.py" --timeout 60 \
+        "${CLAUDE_PROJECT_DIR}" 2>>"$ERR_LOG" &
+    disown 2>/dev/null || true
 fi
 
 # Smart recall — scored entities, compact, with relations + stats

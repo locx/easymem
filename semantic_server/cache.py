@@ -11,6 +11,9 @@ index_cache = {
 entity_cache = {
     "data": None, "mtime": 0.0, "path": "", "size": 0,
     "offset": 0, "append_only": False,
+    # why: the parser silently caps at MAX_ENTITY_COUNT; if a caller then
+    # round-trips entities through rewrite_graph, the truncated set persists.
+    "truncated": False,
 }
 relation_cache = {
     "data": None, "mtime": 0.0, "path": "", "size": 0,
@@ -35,7 +38,7 @@ def clear_index_cache():
 def clear_entity_cache():
     entity_cache.update(
         data=None, mtime=0.0, path="", size=0,
-        offset=0, append_only=False,
+        offset=0, append_only=False, truncated=False,
     )
     entity_cache.pop("_pre_invalidate_mtime", None)
     entity_cache.pop("obs_keys_size", None)

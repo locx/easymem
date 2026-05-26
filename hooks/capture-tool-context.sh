@@ -56,8 +56,9 @@ if [ -f "$MARKER" ]; then
     fi
 fi
 
-# Use standalone .py for bytecode caching (.pyc)
-python3 "${SCRIPT_DIR}/capture_tool_context.py" "$TMPINPUT" "$GRAPH"
+# why: use venv python so the optional deps (orjson, model2vec) match the
+# interpreter the mint phase used; system python3 may lack them.
+"${EASYMEM_PY}" "${SCRIPT_DIR}/capture_tool_context.py" "$TMPINPUT" "$GRAPH"
 PY_EXIT=$?
 
 # Update throttle marker after successful run
