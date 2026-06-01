@@ -6,11 +6,14 @@ import time
 
 from ._json import loads as _fast_loads
 from ._json import dumps as _fast_dumps
+from ._json import load as _fast_load
 
 try:
     import fcntl
 except ImportError:
     fcntl = None  # Windows — locking disabled
+
+_lock_warned = False
 
 from .config import (
     MAX_ENTITY_COUNT,
@@ -147,6 +150,9 @@ def _handle_entity_entry(entities, obs_keys, obj):
         branch = obj.get("_branch")
         if branch and not prev.get("_branch"):
             prev["_branch"] = branch
+        source = obj.get("_source")
+        if source and not prev.get("_source"):
+            prev["_source"] = source
     else:
         obs_list = list(obs)
         if len(obs_list) > MAX_CACHED_OBS:
@@ -160,6 +166,11 @@ def _handle_entity_entry(entities, obs_keys, obj):
         branch = obj.get("_branch")
         if branch:
             info["_branch"] = branch
+        # why: keep _source so rewrites don't strip provenance and session
+        # diversification can read it from cache instead of scanning the file.
+        source = obj.get("_source")
+        if source:
+            info["_source"] = source
         entities[name] = info
         obs_keys[name] = {_obs_dedup_key(o) for o in obs_list}
 
@@ -237,6 +248,12 @@ def _do_full_parse(graph_path, mtime):
     entity_cache["path"] = graph_path
     entity_cache["size"] = estimate_size(entities)
     entity_cache["offset"] = offset
+    # why: incremental reads must confirm they continue the same file; a
+    # cross-process rewrite (os.replace) changes the inode.
+    try:
+        entity_cache["ino"] = os.stat(graph_path).st_ino
+    except OSError:
+        entity_cache["ino"] = None
     entity_cache["append_only"] = False
     entity_cache["obs_keys"] = obs_keys
     entity_cache["obs_keys_size"] = None
@@ -265,7 +282,6 @@ def load_index(memory_dir):
         return index_cache["data"]
 
     try:
-        from ._json import load as _fast_load
         with open(index_path, encoding="utf-8") as f:
             data = _fast_load(f)
         size = estimate_size(data.get("vectors", {}))
@@ -285,7 +301,10 @@ def _merge_incremental_data(existing_ents, existing_obs_keys,
     """Merge incremental parse results into cache, reusing dedup sets."""
     for name, info in new_ents.items():
         if name in existing_ents:
-            prev = existing_ents[name]
+            # why: copy before mutating so a reader holding the pre-merge
+            # dict never sees a half-updated entity.
+            prev = dict(existing_ents[name])
+            prev["observations"] = list(prev.get("observations", []))
             seen = existing_obs_keys.get(name)
             existing_obs_keys[name] = _merge_obs(
                 prev["observations"],
@@ -293,6 +312,7 @@ def _merge_incremental_data(existing_ents, existing_obs_keys,
                 seen,
             )
             _merge_ts(prev, info.get("_created", ""), info.get("_updated", ""))
+            existing_ents[name] = prev
         else:
             existing_ents[name] = info
             # Reuse obs_keys produced by parser when available
@@ -322,6 +342,14 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
     if current_size is not None and current_size < prev_offset:
         return None
 
+    # why: a same/greater-size cross-process rewrite changes the inode;
+    # without this the delta read would continue a different file.
+    try:
+        if os.stat(graph_path).st_ino != entity_cache.get("ino"):
+            return None
+    except OSError:
+        return None
+
     if mtime == entity_cache.get("_pre_invalidate_mtime", 0.0):
         entity_cache["append_only"] = False
         return None
@@ -335,11 +363,14 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
         entity_cache.pop("_pre_invalidate_mtime", None)
         return None
 
-    existing = entity_cache["data"]
+    # why: merge into a copy and swap so a concurrent reader holding the
+    # prior dict never observes a half-merged state.
+    existing = dict(entity_cache["data"])
     _merge_incremental_data(
         existing, existing_obs_keys,
         new_ents, new_obs_keys or {}, new_rels,
     )
+    entity_cache["data"] = existing
     entity_cache["mtime"] = mtime
     entity_cache["offset"] = offset
     entity_cache["size"] = estimate_size(existing)
@@ -419,11 +450,20 @@ class GraphLock:
 
     def __enter__(self):
         if fcntl is None:
+            global _lock_warned
+            if not _lock_warned:
+                # why: no OS lock here; warn once so unguarded concurrent
+                # writes aren't silent (single-process use still works).
+                sys.stderr.write(
+                    "warn: graph lock unavailable; writes unguarded\n"
+                )
+                _lock_warned = True
             self.acquired = True
             return self
         try:
             self._fd = open(self._path, "a")
-        except OSError:
+        except OSError as exc:
+            sys.stderr.write(f"warn: graph lock open failed: {exc}\n")
             return self
         # try/finally so signals (KeyboardInterrupt etc.) don't leak the fd.
         try:
@@ -453,7 +493,7 @@ class GraphLock:
     def __exit__(self, *exc):
         if self._fd is not None:
             try:
-                if self.acquired:
+                if self.acquired and fcntl is not None:
                     fcntl.flock(self._fd, fcntl.LOCK_UN)
             except OSError:
                 pass
@@ -546,7 +586,8 @@ def _build_rewrite_line(entry_type, name_or_r, info_or_none):
         return None
 
 
-def rewrite_graph(memory_dir, entities_dict, relations, *, _lock_held=False):
+def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
+                  _lock_held=False):
     """Atomic rewrite: temp file + fsync + os.replace.
 
     _lock_held: caller already holds GraphLock — skip the inner acquire to
@@ -558,7 +599,9 @@ def rewrite_graph(memory_dir, entities_dict, relations, *, _lock_held=False):
     if entity_cache.get("truncated"):
         raise OSError("refusing to rewrite from a truncated entity cache")
     graph_path = os.path.join(memory_dir, "graph.jsonl")
-    tmp = graph_path + ".new"
+    # why: per-writer temp so concurrent rewriters can't clobber a shared
+    # .new file before either acquires the lock.
+    tmp = f"{graph_path}.new.{os.getpid()}.{time.monotonic_ns()}"
     dropped = 0
 
     def _lines():
@@ -575,6 +618,12 @@ def rewrite_graph(memory_dir, entities_dict, relations, *, _lock_held=False):
                 dropped += 1
                 continue
             yield line
+        # why: non-entity/relation rows must survive a rewrite, not be dropped.
+        for o in (others or []):
+            try:
+                yield _fast_dumps(o) + "\n"
+            except (TypeError, ValueError, OverflowError):
+                dropped += 1
 
     try:
         with open(tmp, "w", encoding="utf-8") as f:

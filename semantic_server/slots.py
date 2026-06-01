@@ -3,13 +3,35 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 
 SLOT_KEYS: tuple[str, ...] = ("persona", "preferences", "guidelines")
 
 
 def _slots_path(memory_dir: str) -> Path:
     return Path(memory_dir) / "slots.json"
+
+
+@contextmanager
+def _slot_lock(memory_dir: str):
+    # why: serialize read-modify-write so concurrent set_slot calls in
+    # different processes can't lose each other's updates.
+    if _fcntl is None:
+        yield
+        return
+    Path(memory_dir).mkdir(parents=True, exist_ok=True)
+    with open(Path(memory_dir) / ".slots.lock", "a") as lf:
+        _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
 
 
 def _read(memory_dir: str) -> dict[str, str]:
@@ -46,9 +68,10 @@ def get_slot(memory_dir: str, key: str) -> str:
 def set_slot(memory_dir: str, key: str, value: str) -> None:
     if key not in SLOT_KEYS:
         raise ValueError(f"unknown slot key: {key!r}")
-    data = _read(memory_dir)
-    data[key] = value
-    _write(memory_dir, data)
+    with _slot_lock(memory_dir):
+        data = _read(memory_dir)
+        data[key] = value
+        _write(memory_dir, data)
 
 
 def list_slots(memory_dir: str) -> dict[str, str]:

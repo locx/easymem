@@ -41,6 +41,9 @@ def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_DAYS_IN_MONTH = (0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
 def normalize_iso_ts(ts):
     """Normalize ISO timestamp for safe lexicographic sort.
 
@@ -51,9 +54,18 @@ def normalize_iso_ts(ts):
     if (len(ts) >= 10 and ts[4] == '-' and ts[7] == '-'
             and ts[:4].isdigit() and ts[5:7].isdigit()
             and ts[8:10].isdigit()):
+        year = int(ts[:4])
         month = int(ts[5:7])
         day = int(ts[8:10])
-        if 1 <= month <= 12 and 1 <= day <= 31:
+        if 1 <= month <= 12 and day >= 1:
+            max_day = _DAYS_IN_MONTH[month]
+            if month == 2 and not (
+                    year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+                max_day = 28
+            if day > max_day:
+                # why: out-of-range day breaks lexicographic range filters;
+                # clamp to the month's last day for correct since/until bounds.
+                return f"{ts[:8]}{max_day:02d}{ts[10:]}"
             return ts
     try:
         parts = ts.split('T', 1)
@@ -147,6 +159,10 @@ def init_branch(project_dir):
 def refresh_branch():
     """Re-read branch if interval expired. Returns (branch, changed)."""
     global _current_branch, _branch_check_mono
+    if not _project_dir:
+        # why: without init_branch the project dir is unknown; reading
+        # .git/HEAD relative to cwd would mislead, so report no change.
+        return _current_branch or "unknown", False
     now = time.monotonic()
     with _branch_lock:
         if now - _branch_check_mono < _BRANCH_CHECK_INTERVAL:

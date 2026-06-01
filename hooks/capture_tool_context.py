@@ -42,16 +42,21 @@ def _iso_now() -> str:
     return _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime())
 
 
-def _current_branch(cwd: str = "") -> str:
-    head_path = os.path.join(cwd or os.getcwd(), ".git", "HEAD")
+def _current_branch(project_dir: str = "") -> str:
+    base = (project_dir or os.environ.get("CLAUDE_PROJECT_DIR", "")
+            or os.getcwd())
+    head_path = os.path.join(base, ".git", "HEAD")
     try:
         with open(head_path) as f:
-            content = f.read().strip()
+            content = f.read(256).strip()
         if content.startswith("ref: refs/heads/"):
             return content[16:]
+        if content.startswith("ref: "):
+            return content[5:].rsplit("/", 1)[-1]
+        # why: match smart_recall for detached HEAD so branch scoring agrees.
+        return content[:12] if len(content) >= 8 else ""
     except OSError:
-        pass
-    return ""
+        return ""
 
 
 def _append_episode(graph_path: str, name: str,
@@ -89,6 +94,9 @@ def _append_episode(graph_path: str, name: str,
     if _fcntl is not None and lock_fd is None:
         # why: unlocked append races maintenance's read-rewrite-replace
         # and loses the write; defer via .pending sidecar instead.
+        sys.stderr.write(
+            "[easymem] lock unavailable; episode deferred to .pending\n"
+        )
         pending_path = graph_path + ".pending"
         try:
             with open(pending_path, "a", encoding="utf-8") as f:
@@ -319,6 +327,10 @@ def _check_file_warnings(graph_path, filename, session_id):
                             )
                 except (json.JSONDecodeError, ValueError):
                     continue
+                # why: stop scanning once every bucket is full to its cap.
+                if (len(warnings) >= 5 and len(decisions) >= 3
+                        and len(relations_out) >= 5):
+                    break
     except OSError:
         return ""
 

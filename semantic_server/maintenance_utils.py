@@ -84,11 +84,12 @@ def prune_entities(
 
     pruned_names = set()
     kept = []
+    # why: loop-invariant; bind once instead of per episode iteration.
+    EPISODE_DECAY_DAYS = episode_decay_days
+    EPISODE_SURVIVAL_RECALL = episode_survival_recall
     for e in entities:
         # Episode decay: unrecalled episodes prune past episode_decay_days
         if e.get("entityType") == "episode":
-            EPISODE_DECAY_DAYS = episode_decay_days
-            EPISODE_SURVIVAL_RECALL = episode_survival_recall
             ts = e.get("_updated") or e.get("_created", "")
             if ts:
                 try:
@@ -457,6 +458,6 @@ def stamp_metadata(entities, branch):
         if "_created" not in e:
             e["_created"] = now
         if "_updated" not in e:
-            # Always ensure _updated exists
-            e["_updated"] = e.get("_updated", now)
+            # why: entities sort/score by _updated; seed it at creation.
+            e["_updated"] = now
     return entities

@@ -182,7 +182,7 @@ def main():
     _last_mtime_time = _now_init
     _cache_mod.last_index_check = _now_init
 
-    buf = b""
+    buf = bytearray()
     stdin_raw = sys.stdin.buffer
 
     try:
@@ -209,12 +209,19 @@ def main():
             if _shutdown_requested:
                 break
 
+            if len(buf) + len(chunk) > MAX_INPUT_CHARS:
+                # why: a newline-less stream must not grow buf without bound.
+                sys.stderr.write(
+                    f"warn: input buffer overflow; dropping {len(buf)} bytes\n"
+                )
+                buf.clear()
+                continue
             buf += chunk
 
             while b"\n" in buf:
                 nl = buf.index(b"\n")
-                raw_line = buf[:nl]
-                buf = buf[nl + 1:]
+                raw_line = bytes(buf[:nl])
+                del buf[:nl + 1]
 
                 if len(raw_line) > MAX_INPUT_CHARS:
                     sys.stderr.write(

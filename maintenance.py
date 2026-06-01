@@ -8,6 +8,7 @@ try:
     import fcntl
 except ImportError:
     fcntl = None  # Windows — locking disabled
+import heapq
 import json
 import math
 import os
@@ -46,7 +47,6 @@ from semantic_server.text import (
     load_aliases,
     extract_date_stems,
 )
-from semantic_server.graph import rewrite_graph
 from semantic_server.workflows import extract_workflows
 from semantic_server.maintenance_utils import (
     prune_entities,
@@ -501,11 +501,12 @@ def _build_promotion_block(entities, recall_counts):
         s = score_entity(ent, now_ts, recall_counts, None, 90)
         if s > 0:
             scored.append((s, name, etype, ent.get("observations", [])))
-    scored.sort(reverse=True)
     lines = [_MEM_BLOCK_START, "## EasyMem graph (auto-promoted)", ""]
     if scored:
         lines.append("### Top entities")
-        for _, name, etype, obs in scored[:_PROMOTE_TOP_N]:
+        # why: heapq.nlargest is O(n log k) vs sorting the whole list.
+        for _, name, etype, obs in heapq.nlargest(
+                _PROMOTE_TOP_N, scored):
             first = next(
                 (o.strip()[:120] for o in obs
                  if isinstance(o, str) and o.strip()),
@@ -655,6 +656,14 @@ def run(project_dir, force=False):
             entities, relations, pruned, merged, recall_counts = \
                 _compute_maintenance(entities, relations, project_dir, easymem_dir)
 
+            # Surfaces stale beliefs that decay alone won't catch.
+            # Same-entity contradictions on episode-sourced entities
+            # auto-resolve (newer obs wins); others fall to sidecar.
+            # why: resolve in-place before the single write so the rewrite
+            # is lock-consistent and preserves non-entity/relation rows.
+            findings = detect_contradictions(entities)
+            resolve_contradictions(entities, findings)
+
             write_jsonl(graph_path, chain(entities, relations, others))
             Path(marker).touch()
         finally:
@@ -663,19 +672,6 @@ def run(project_dir, force=False):
         _finalize_maintenance(
             easymem_dir, entities, recall_counts, pruned, merged
         )
-
-        # Surfaces stale beliefs that decay alone won't catch.
-        # Same-entity contradictions on episode-sourced entities
-        # auto-resolve (newer obs wins); others fall to sidecar.
-        findings = detect_contradictions(entities)
-        resolved, _ = resolve_contradictions(entities, findings)
-        if resolved:
-            ent_dict = {e["name"]: e for e in entities
-                        if isinstance(e, dict) and e.get("name")}
-            # why: rewrite_graph re-locks; a kill between the prior
-            # write_jsonl and here loses supersede prefixes, but the
-            # detector re-runs on next maintenance pass.
-            rewrite_graph(easymem_dir, ent_dict, relations)
         write_contradictions_sidecar(easymem_dir, findings)
 
         _promote_to_memory_md(project_dir, entities, recall_counts)

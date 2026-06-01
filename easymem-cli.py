@@ -118,9 +118,12 @@ def _parse_positional(args):
     if first.startswith('{') or first.startswith('['):
         try:
             parsed = json.loads(first)
-            return parsed if isinstance(parsed, dict) else {}
+            if isinstance(parsed, dict):
+                return parsed
         except (json.JSONDecodeError, ValueError):
-            return {}
+            # why: a brace/bracket query that isn't valid JSON is a normal
+            # search string; fall through instead of dropping it.
+            pass
     # flag -> (result_key, cast); str never raises so warning path
     # is int-only.
     flag_spec = {
@@ -206,7 +209,9 @@ def _merge_pending(memory_dir):
                     break
                 except (IOError, OSError):
                     if _time.monotonic() >= deadline:
-                        return
+                        # why: server holds the lock; defer the merge to the
+                        # next invocation rather than hang or merge unlocked.
+                        raise TimeoutError
                     _time.sleep(delay)
                     delay = min(delay * 2, 0.5)
             try:
@@ -217,7 +222,10 @@ def _merge_pending(memory_dir):
                 except OSError:
                     pass
 
-    merge_pending(mem, graph, pending, lock=_lock(), invalidate_cb=None)
+    try:
+        merge_pending(mem, graph, pending, lock=_lock(), invalidate_cb=None)
+    except TimeoutError:
+        return
 
 
 # --- Doctor ---
@@ -236,7 +244,7 @@ def _load_graph_doctor(graph_path, issues):
                 except json.JSONDecodeError:
                     issues.append("Corrupt JSONL line")
                     continue
-                if "name" in row:
+                if row.get("type") == "entity" and row.get("name"):
                     entities[row["name"]] = row
                 elif "from" in row and "to" in row:
                     relations.append(row)
@@ -789,7 +797,8 @@ def _cmd_nudge(extra_args):
     )
     os.makedirs(state_dir, exist_ok=True)
     marker = os.path.join(state_dir, f"{h}.suppress")
-    open(marker, "w").close()
+    with open(marker, "w"):
+        pass
     print(json.dumps(
         {"ok": True, "suppressed": project, "marker": marker},
         indent=2,
@@ -853,7 +862,9 @@ def _run_diff(memory_dir):
                         new_u = obj.get("_updated", "")
                         if new_u and (not prev.get("_updated")
                                       or new_u > prev["_updated"]):
-                            prev["_updated"] = new_u
+                            # why: keep the latest revision's full state so
+                            # resolved outcomes / type changes aren't masked.
+                            entities[name] = dict(obj)
                     else:
                         entities[name] = dict(obj)
                 except (json.JSONDecodeError, ValueError):
@@ -1077,6 +1088,10 @@ def main():
                 sys.exit(1)
             sh = os.path.join(_script_dir, "import-easymem.sh")
             cmd = [sh, extra_args[0], project_dir]
+        if not os.access(sh, os.X_OK):
+            print(f"Error: {sh} not found or not executable",
+                  file=sys.stderr)
+            sys.exit(1)
         sys.exit(subprocess.run(cmd, env=env).returncode)
 
     if not (tool_name in _READ_ONLY_CMDS and os.path.isdir(memory_dir)):
@@ -1110,7 +1125,8 @@ def main():
         else:
             dirty = os.path.join(memory_dir, ".index-dirty")
             try:
-                open(dirty, "a").close()
+                with open(dirty, "a"):
+                    pass
             except OSError:
                 pass
             print(json.dumps({"queued": True, "hint": "index will rebuild at next maintenance run; use --rebuild-now for immediate"}))
@@ -1191,7 +1207,8 @@ def main():
     if tool_name in ("write", "decide", "remove"):
         dirty = os.path.join(memory_dir, ".index-dirty")
         try:
-            open(dirty, "a").close()
+            with open(dirty, "a"):
+                pass
         except OSError:
             pass
 

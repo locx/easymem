@@ -61,7 +61,12 @@ def migrate(auto_mem_dir: str, graph_path: str) -> int:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     existing = _existing_names(graph_path)
     migrated = 0
-    for fname in sorted(os.listdir(auto_mem_dir)):
+    try:
+        names = sorted(os.listdir(auto_mem_dir))
+    except OSError:
+        return 0
+    lines = []
+    for fname in names:
         if not fname.endswith(".md") or fname == "MEMORY.md":
             continue
         fpath = os.path.join(auto_mem_dir, fname)
@@ -87,12 +92,15 @@ def migrate(auto_mem_dir: str, graph_path: str) -> int:
             "_updated": now,
             "_migrated_from": "auto-memory",
         }
-        with open(graph_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        lines.append(json.dumps(entry, separators=(",", ":")) + "\n")
         existing.add(entity_name)
         migrated += 1
+    # why: one fsync after the batch instead of O(n) per-entity syncs.
+    if lines:
+        with open(graph_path, "a", encoding="utf-8") as f:
+            f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
     return migrated
 
 

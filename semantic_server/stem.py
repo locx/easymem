@@ -76,8 +76,8 @@ def stem_word(word):
         _stem_cache.move_to_end(word)
         return _stem_cache[word]
     s = porter_stem(word)
+    # why: a freshly assigned key is already last; move_to_end is a no-op.
     _stem_cache[word] = s
-    _stem_cache.move_to_end(word)
     if len(_stem_cache) > _STEM_CACHE_MAX:
         _stem_cache.popitem(last=False)
     return s

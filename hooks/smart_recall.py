@@ -19,6 +19,7 @@ Intelligence features:
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -211,7 +212,7 @@ def _load_graph(memory_dir):
 
 
 def _score_entity(info, now_ts, recall_counts, name,
-                  current_branch, active_files=None):
+                  current_branch, active_pat=None):
     """Score: obs_count * recency * recall * branch * active."""
     obs = info.get("observations", [])
     if not obs:
@@ -230,14 +231,14 @@ def _score_entity(info, now_ts, recall_counts, name,
                   in _MAIN_BRANCHES else 0.85)
 
     # Proactive Priming: boost if entity relates to active files
-    if active_files:
-        name_lower = name.lower()
-        is_active = any(f in name_lower for f in active_files)
+    if active_pat is not None:
+        # why: one compiled alternation replaces O(files) substring scans
+        # per name/observation.
+        is_active = bool(active_pat.search(name.lower()))
         if not is_active:
             # Cap obs scan: boost is binary, no need to inspect every obs.
             for o in obs[:10]:
-                o_lower = o.lower()
-                if any(f in o_lower for f in active_files):
+                if isinstance(o, str) and active_pat.search(o.lower()):
                     is_active = True
                     break
         if is_active:
@@ -416,6 +417,10 @@ def _main_body(memory_dir, compact):
     recall_counts = _read_recall_counts(memory_dir)
     now_ts = time.time()
     active_files = _get_active_files(project_dir)
+    active_pat = (
+        re.compile("|".join(re.escape(f) for f in active_files))
+        if active_files else None
+    )
 
     scored = []
     type_counts = defaultdict(int)
@@ -424,7 +429,7 @@ def _main_body(memory_dir, compact):
         type_counts[etype] += 1
         score = _score_entity(
             info, now_ts, recall_counts, name,
-            current_branch, active_files,
+            current_branch, active_pat,
         )
         if score > _MIN_SCORE:
             scored.append((score, name, info))

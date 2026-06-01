@@ -67,15 +67,16 @@ def maybe_reload_recall_counts():
     now = time.monotonic()
     if now - _last_recall_check < RECALL_CHECK_INTERVAL:
         return
-    _last_recall_check = now
-    try:
-        st = os.stat(recall_path)
-        mtime = st.st_mtime
-    except OSError:
-        return
-    if mtime == recall_mtime:
-        return
+    # why: stat the guard mtime and reload under one lock so a concurrent
+    # flush can't slip a different file between the check and the open.
     with _recall_lock:
+        try:
+            mtime = os.stat(recall_path).st_mtime
+        except OSError:
+            return
+        _last_recall_check = now
+        if mtime == recall_mtime:
+            return
         try:
             with open(recall_path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -114,13 +115,10 @@ def flush_recall_counts():
         with _recall_lock:
             recall_dirty = False
         return
-    if _load_failed:
-        # why: refuse to overwrite disk while in-memory state is known-degraded.
-        return
-    if not recall_dirty:
-        return
     with _recall_lock:
-        if not recall_dirty:
+        # why: read the degraded/dirty flags under the same lock that writes
+        # them so the decision and the snapshot are consistent.
+        if _load_failed or not recall_dirty:
             return
         recall_last_flush = time.monotonic()
         snapshot = dict(recall_counts)
@@ -134,9 +132,12 @@ def flush_recall_counts():
             os.fsync(f.fileno())
         os.replace(tmp, recall_path)
         try:
-            recall_mtime = os.path.getmtime(recall_path)
+            new_mtime = os.path.getmtime(recall_path)
         except OSError:
-            pass
+            new_mtime = None
+        if new_mtime is not None:
+            with _recall_lock:
+                recall_mtime = new_mtime
     except OSError:
         try:
             os.unlink(tmp)

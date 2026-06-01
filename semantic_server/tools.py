@@ -117,16 +117,26 @@ def create_entities(entities_input, memory_dir):
     existing = load_graph_entities(memory_dir)
     norm_index = _build_norm_index(existing)
     similar_warnings = []
+    deduped = []
     for entry in new_entries:
         name = entry["name"]
         if name in existing:
+            # why: exact-name dup; load-time merge folds observations, so
+            # appending another record only bloats the raw JSONL.
             continue
+        deduped.append(entry)
         similar = _fuzzy_resolve_existing(name, norm_index)
         if similar:
             similar_warnings.append(
                 f"'{name}' similar to existing "
                 f"'{similar}'"
             )
+
+    skipped = len(new_entries) - len(deduped)
+    new_entries = deduped
+    if not new_entries:
+        return {"created": 0, "skipped": skipped,
+                "message": "All entities already exist"}
 
     if not append_jsonl(memory_dir, new_entries):
         return {
@@ -142,6 +152,8 @@ def create_entities(entities_input, memory_dir):
         f"{len(new_entries)} entities: {names}",
     )
     result = {"created": len(new_entries)}
+    if skipped:
+        result["skipped"] = skipped
     if similar_warnings:
         result["similar_entities"] = similar_warnings
         result["hint"] = (
@@ -542,19 +554,19 @@ def update_decision_outcome(args, memory_dir):
             f"Lesson: {lesson[:MAX_OBS_LENGTH]}"
         )
 
-    entities = load_graph_entities(memory_dir)
     for entity_name in candidates:
-        entity_exists = entity_name in entities
         result = add_observations(
             entity_name, new_obs, memory_dir
         )
-        if isinstance(result.get("error"), str):
-            if entity_exists:
-                return {
-                    "error": f"Write failed for '{entity_name}': "
-                             + result["error"],
-                }
-            continue
+        err = result.get("error")
+        if isinstance(err, str):
+            # why: add_observations already loads the graph; a not-found
+            # means try the next candidate, any other error is fatal.
+            if "not found" in err:
+                continue
+            return {
+                "error": f"Write failed for '{entity_name}': " + err,
+            }
         log_event(
             "OUTCOME",
             f'"{title}" -> {outcome}'
@@ -758,6 +770,8 @@ def list_decisions(memory_dir, stale_days=None, limit=50):
             "updated": updated,
         })
 
+    # why: default listing is newest-first; stale-hygiene mode is oldest-first
+    # so the most-stale decisions surface at the top for triage.
     decisions.sort(
         key=lambda d: d["updated"],
         reverse=(stale_days is None),
@@ -773,13 +787,19 @@ def list_decisions(memory_dir, stale_days=None, limit=50):
 
 
 def remove_observations(entity_name, observations,
-                        memory_dir):
+                        memory_dir, _retry=False):
     """Remove specific observations from an entity."""
     if not isinstance(entity_name, str) \
             or not entity_name:
         return {"error": "entity name required"}
     if not isinstance(observations, list):
         return {"error": "observations must be a list"}
+
+    graph_path = os.path.join(memory_dir, "graph.jsonl")
+    try:
+        pre_mtime = os.path.getmtime(graph_path)
+    except OSError:
+        pre_mtime = 0.0
 
     entities = load_graph_entities(memory_dir)
     if entity_name not in entities:
@@ -802,6 +822,20 @@ def remove_observations(entity_name, observations,
         "_updated": now_iso(),
     }
     rels = load_graph_relations(memory_dir)
+
+    try:
+        post_mtime = os.path.getmtime(graph_path)
+    except OSError:
+        post_mtime = 0.0
+    if post_mtime != pre_mtime:
+        if not _retry:
+            invalidate_caches()
+            return remove_observations(
+                entity_name, observations, memory_dir, _retry=True,
+            )
+        log_event("RACE", f'concurrent write on entity="{entity_name}"')
+        return {"error": "concurrent write", "entity": entity_name}
+
     try:
         rewrite_graph(memory_dir, updated, rels)
     except OSError:
@@ -844,7 +878,7 @@ def _rewrite_relations_for_rename(rels, old_name, new_name):
     return fixed_rels, relations_updated, dropped_self_loops, dropped_dups
 
 
-def rename_entity(old_name, new_name, memory_dir):
+def rename_entity(old_name, new_name, memory_dir, _retry=False):
     """Rename an entity, updating all relation references.
 
     Drops self-loops and dedups duplicate (from, to, type) edges
@@ -855,6 +889,12 @@ def rename_entity(old_name, new_name, memory_dir):
         return {"error": "old_name and new_name required"}
     if old_name == new_name:
         return {"error": "names are identical"}
+
+    graph_path = os.path.join(memory_dir, "graph.jsonl")
+    try:
+        pre_mtime = os.path.getmtime(graph_path)
+    except OSError:
+        pre_mtime = 0.0
 
     entities = load_graph_entities(memory_dir)
     if old_name not in entities:
@@ -875,6 +915,19 @@ def rename_entity(old_name, new_name, memory_dir):
     fixed_rels, relations_updated, dropped_self_loops, dropped_dups = (
         _rewrite_relations_for_rename(rels, old_name, new_name)
     )
+
+    try:
+        post_mtime = os.path.getmtime(graph_path)
+    except OSError:
+        post_mtime = 0.0
+    if post_mtime != pre_mtime:
+        if not _retry:
+            invalidate_caches()
+            return rename_entity(
+                old_name, new_name, memory_dir, _retry=True,
+            )
+        log_event("RACE", f'concurrent write on entity="{old_name}"')
+        return {"error": "concurrent write", "entity": old_name}
 
     try:
         rewrite_graph(memory_dir, updated, fixed_rels)

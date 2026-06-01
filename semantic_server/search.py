@@ -107,7 +107,7 @@ def _enrich_results(results, source, max_obs=MAX_CACHED_OBS):
 
 
 def _session_from_source(source):
-    """Recover session id for diversification — _source is stripped from the cached entity record."""
+    """Recover session id for diversification from a _source string."""
     if not isinstance(source, str) or ":" not in source:
         return None
     parts = source.split(":")
@@ -117,34 +117,18 @@ def _session_from_source(source):
 
 
 def _load_source_map(memory_dir, names):
-    """Recover _source from disk because the entity cache does not retain it."""
-    import json as _json
-    import os as _os2
+    """Recover _source for names from the (warm) entity cache."""
     wanted = set(names)
     if not wanted:
         return {}
-    path = _os2.path.join(memory_dir, "graph.jsonl")
+    # why: the cache now retains _source, so a full graph.jsonl scan per
+    # diversified query is no longer needed.
+    ents = load_graph_entities(memory_dir)
     out: dict[str, str] = {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = _json.loads(line)
-                except (ValueError, _json.JSONDecodeError):
-                    continue
-                name = obj.get("name", "")
-                if name in wanted:
-                    src = obj.get("_source")
-                    if isinstance(src, str) and src:
-                        out[name] = src
-                    wanted.discard(name)
-                    if not wanted:
-                        break
-    except OSError:
-        return out
+    for name in wanted:
+        src = ents.get(name, {}).get("_source")
+        if isinstance(src, str) and src:
+            out[name] = src
     return out
 
 
@@ -278,17 +262,31 @@ def _tfidf_search_impl(query, memory_dir, top_k, current_branch, idx):
             "current_branch": current_branch}
 
 
+_corpus_tok_cache: dict = {"key": None, "data": {}}
+
+
 def _idf_rerank(query, fused, top_k, idf, current_entities, alias_map):
     """IDF-weighted overlap re-rank; original rank breaks ties."""
     q_toks = set(_tokenize_query(query, alias_map))
     if not q_toks:
         return fused[:top_k]
+    # why: corpus tokenization is identical across queries until the graph or
+    # aliases change; memoize per entity instead of re-tokenizing each query.
+    cache_key = (_ec.get("mtime"), id(alias_map))
+    if _corpus_tok_cache["key"] != cache_key:
+        _corpus_tok_cache["key"] = cache_key
+        _corpus_tok_cache["data"] = {}
+    cached = _corpus_tok_cache["data"]
     scored = []
     for orig_rank, r in enumerate(fused):
-        ent = current_entities.get(r["entity"]) or {}
-        obs = ent.get("observations") or []
-        text = " ".join(o for o in obs if isinstance(o, str))
-        c_toks = set(_tokenize_query(text, alias_map))
+        name = r["entity"]
+        c_toks = cached.get(name)
+        if c_toks is None:
+            ent = current_entities.get(name) or {}
+            obs = ent.get("observations") or []
+            text = " ".join(o for o in obs if isinstance(o, str))
+            c_toks = set(_tokenize_query(text, alias_map))
+            cached[name] = c_toks
         # why: out-of-vocab tokens have no corpus statistics; treat as 0
         # so re-rank only acts on terms the index actually knows.
         weight = sum(idf.get(t, 0.0) for t in (q_toks & c_toks))
@@ -327,6 +325,9 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
     # why: re-rank needs enough fused candidates to pick from.
     inner_top_k = (max(rerank_pool * 2, top_k * 4)
                    if rerank_pool > top_k else top_k * 4)
+    # why: bound the per-query vector matmul/argsort; MAX_CANDIDATES was
+    # imported for exactly this cap but never applied.
+    inner_top_k = min(inner_top_k, MAX_CANDIDATES)
     tfidf_out = _tfidf_search_impl(
         query, memory_dir, inner_top_k, current_branch, idx,
     )

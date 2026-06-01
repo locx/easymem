@@ -26,8 +26,6 @@ try:
         except _orjson.JSONDecodeError as exc:
             raise ValueError(str(exc)) from exc
 
-    _backend = "orjson"
-
 except ImportError:
     import json as _json
 
@@ -42,5 +40,3 @@ except ImportError:
 
     def load(f):
         return _json.load(f)
-
-    _backend = "json"

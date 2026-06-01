@@ -1,6 +1,7 @@
 """Vector retrieval: model loading, encoding, int8 quantization."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from typing import Optional
@@ -105,14 +106,25 @@ def save_index(
     os.replace(tmp, path)
 
 
+_index_cache: dict = {"path": None, "mtime": None, "data": None}
+
+
 def load_index(memory_dir: str) -> Optional[dict]:
     """Load vec_index.npz; return None if missing/corrupt."""
     path = os.path.join(memory_dir, "vec_index.npz")
-    if not os.path.exists(path):
-        return None
     try:
-        z = np.load(path)
-        return {
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    # why: decompressing the full .npz on every search is the dominant
+    # per-query I/O; cache by mtime and reload only when it changes.
+    if (_index_cache["path"] == path and _index_cache["mtime"] == mtime
+            and _index_cache["data"] is not None):
+        return _index_cache["data"]
+    try:
+        # why: never deserialize via pickle, even if a default or env changes.
+        z = np.load(path, allow_pickle=False)
+        data = {
             "vecs": z["vecs"],
             "names": [str(n) for n in z["names"]],
             "model": str(z["model"]),
@@ -120,6 +132,8 @@ def load_index(memory_dir: str) -> Optional[dict]:
         }
     except (OSError, ValueError, KeyError):
         return None
+    _index_cache.update(path=path, mtime=mtime, data=data)
+    return data
 
 
 def vector_search(
@@ -173,16 +187,22 @@ def rebuild_if_stale(
     meta_path = _index_metadata_path(memory_dir)
     model_id = os.environ.get("EMBED_MODEL", EMBED_MODEL)
 
+    # why: a names hash catches same-count edits (rename, swap) that the
+    # bare count proxy misses when mtime resolution is coarse.
+    names_hash = hashlib.md5(
+        "\n".join(sorted(entities)).encode("utf-8")
+    ).hexdigest()[:16]
+
     if os.path.exists(path) and os.path.exists(meta_path):
         try:
             with open(meta_path) as _mf:
                 prev = _mf.read().strip().split("|")
             prev_model = prev[0]
-            prev_count = int(prev[1])
             prev_mtime = float(prev[2])
+            prev_hash = prev[3]
             if (
                 prev_model == model_id
-                and prev_count == len(entities)
+                and prev_hash == names_hash
                 and abs(prev_mtime - graph_mtime) < 1e-6
             ):
                 return False
@@ -194,6 +214,6 @@ def rebuild_if_stale(
 
     tmp = meta_path + ".tmp"
     with open(tmp, "w") as f:
-        f.write(f"{model_id}|{len(entities)}|{graph_mtime}")
+        f.write(f"{model_id}|{len(entities)}|{graph_mtime}|{names_hash}")
     os.replace(tmp, meta_path)
     return True

@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import sys
 
 _EXT_TO_LANG: dict[str, str] = {
     ".py": "python",
@@ -159,9 +160,11 @@ def _extract_go(text: str) -> dict:
     imports = [m.group(1) for m in _GO_IMPORT_SINGLE.finditer(text)]
     for block in _GO_IMPORT_BLOCK.finditer(text):
         for line in block.group(1).splitlines():
-            s = line.strip().strip('"').strip()
-            if s and not s.startswith("//"):
-                imports.append(s)
+            s = line.strip()
+            if not s or s.startswith("//"):
+                continue
+            # why: aliased imports are `alias "path"`; keep only the path.
+            imports.append(s.split()[-1].strip('"'))
     return {"exports": exports, "imports": imports, "docstring": "",
             "kinds": ["function"] * len(exports), "doc_lines": []}
 
@@ -301,6 +304,10 @@ def scan_project(root, excludes: frozenset[str] | set[str] | None = None):
             except OSError:
                 continue
             if sz > MAX_FILE_BYTES:
+                # why: silently skipping large files hides gaps in the index.
+                sys.stderr.write(
+                    f"[code-index] skipped {rel} ({sz} bytes > cap)\n"
+                )
                 continue
             try:
                 text = full.read_text(encoding="utf-8", errors="replace")
@@ -316,10 +323,12 @@ from .io_utils import partition_graph
 
 
 _CODE_SOURCE_PREFIX = "code:scan:"
+# why: indexer-owned relation types; keep in sync with the builders that emit
+# them so a re-index drops only what it rebuilds.
+_OWNED_REL_TYPES = ("imports", "defined_in")
 
 
-def _build_entity(sf: ScannedFile, now_iso: str) -> dict:
-    info = extract(sf.text, sf.lang)
+def _build_entity(sf: ScannedFile, now_iso: str, info: dict) -> dict:
     obs: list[str] = [f"lang: {sf.lang}"]
     # why: one observation per fact mirrors the project's existing pattern
     # (e.g. workflow extractor emits one `event: ...` per event).
@@ -340,8 +349,8 @@ def _build_entity(sf: ScannedFile, now_iso: str) -> dict:
     }
 
 
-def _build_symbol_entities(sf: ScannedFile, now_iso: str) -> list[dict]:
-    info = extract(sf.text, sf.lang)
+def _build_symbol_entities(
+        sf: ScannedFile, now_iso: str, info: dict) -> list[dict]:
     out: list[dict] = []
     for name, kind in zip(info["exports"], info.get("kinds") or []):
         out.append({
@@ -357,8 +366,7 @@ def _build_symbol_entities(sf: ScannedFile, now_iso: str) -> list[dict]:
     return out
 
 
-def _build_defined_in_relations(sf: ScannedFile) -> list[dict]:
-    info = extract(sf.text, sf.lang)
+def _build_defined_in_relations(sf: ScannedFile, info: dict) -> list[dict]:
     rels: list[dict] = []
     for name, kind in zip(info["exports"], info.get("kinds") or []):
         rels.append({
@@ -369,8 +377,8 @@ def _build_defined_in_relations(sf: ScannedFile) -> list[dict]:
     return rels
 
 
-def _build_relations(sf: ScannedFile, project_root: str) -> list[dict]:
-    info = extract(sf.text, sf.lang)
+def _build_relations(
+        sf: ScannedFile, project_root: str, info: dict) -> list[dict]:
     full = str(Path(project_root) / sf.rel_path)
     rels: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -397,14 +405,16 @@ def index_project(memory_dir: str, project_root: str,
     new_entities: list[dict] = []
     new_rels: list[dict] = []
     for sf in scan_project(project_root, excludes):
-        ent = _build_entity(sf, now_iso)
+        # why: parse once per file; the four builders share the same result.
+        info = extract(sf.text, sf.lang)
+        ent = _build_entity(sf, now_iso, info)
         new_entities.append(ent)
         seen_names.add(ent["name"])
-        sym_ents = _build_symbol_entities(sf, now_iso)
+        sym_ents = _build_symbol_entities(sf, now_iso, info)
         new_entities.extend(sym_ents)
         seen_names.update(e["name"] for e in sym_ents)
-        new_rels.extend(_build_relations(sf, project_root))
-        new_rels.extend(_build_defined_in_relations(sf))
+        new_rels.extend(_build_relations(sf, project_root, info))
+        new_rels.extend(_build_defined_in_relations(sf, info))
 
     graph_path = os.path.join(memory_dir, "graph.jsonl")
     # why: lock across partition+rewrite so a concurrent server/maintenance
@@ -418,7 +428,7 @@ def index_project(memory_dir: str, project_root: str,
                 "symbols": 0,
                 "error": "graph lock timeout",
             }
-        raw_entities, raw_rels, _ = partition_graph(graph_path)
+        raw_entities, raw_rels, raw_others = partition_graph(graph_path)
 
         # why: raw partition (not load_graph_entities) preserves _source for
         # session tagging; indexer owns every file:/function:/class: entity.
@@ -443,7 +453,6 @@ def index_project(memory_dir: str, project_root: str,
 
         # why: drop owned-type relations AND any inbound relation whose endpoint
         # references an entity we just dropped — otherwise dangling refs leak.
-        _OWNED_REL_TYPES = ("imports", "defined_in")
         kept_rels: list[dict] = []
         for r in raw_rels:
             if r.get("relationType") in _OWNED_REL_TYPES:
@@ -453,7 +462,8 @@ def index_project(memory_dir: str, project_root: str,
             kept_rels.append({k: v for k, v in r.items() if k != "type"})
         kept_rels.extend(new_rels)
 
-        rewrite_graph(memory_dir, kept, kept_rels, _lock_held=True)
+        rewrite_graph(memory_dir, kept, kept_rels, others=raw_others,
+                      _lock_held=True)
     n_files = sum(1 for e in new_entities if e["name"].startswith("file:"))
     n_symbols = len(new_entities) - n_files
     return {

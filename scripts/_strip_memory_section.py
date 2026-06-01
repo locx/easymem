@@ -25,8 +25,11 @@ def strip(path: str) -> bool:
     if end < 0:
         new_content = content[:start].rstrip() + "\n"
     else:
+        prefix = content[:start].rstrip()
+        # why: no leading blank line when the section starts the file.
+        sep = "\n" if prefix else ""
         new_content = (
-            content[:start].rstrip() + "\n" + content[end + 1:]
+            prefix + sep + content[end + 1:]
         ).rstrip() + "\n"
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

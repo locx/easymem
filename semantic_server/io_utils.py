@@ -106,13 +106,16 @@ def merge_pending(
                 return (0, 0)
 
         entries = []
-        bytes_read = 0
+        try:
+            # why: approximate metric; one stat avoids re-encoding every line.
+            bytes_read = processing_path.stat().st_size
+        except OSError:
+            bytes_read = 0
         try:
             with open(
                 processing_path, encoding="utf-8", errors="replace"
             ) as f:
                 for line in f:
-                    bytes_read += len(line.encode("utf-8", errors="replace"))
                     line = line.strip()
                     if not line:
                         continue
@@ -132,6 +135,7 @@ def merge_pending(
                 pass
             return (0, 0)
 
+        fsync_ok = True
         try:
             with open(graph_path, "a", encoding="utf-8") as gf:
                 for entry in entries:
@@ -144,10 +148,16 @@ def merge_pending(
                     try:
                         os.fsync(gf.fileno())
                     except OSError:
-                        pass
+                        fsync_ok = False
         except OSError as exc:
             _log.warning("merge_pending: append failed: %s", exc)
             return (0, 0)
+
+        if not fsync_ok:
+            # why: durability unconfirmed; keep .processing so the next tick
+            # retries (load-time merge dedups any re-append).
+            _log.warning("merge_pending: fsync failed; deferring unlink")
+            return (len(entries), bytes_read)
 
         try:
             processing_path.unlink()

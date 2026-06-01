@@ -42,6 +42,9 @@ def clear_entity_cache():
     )
     entity_cache.pop("_pre_invalidate_mtime", None)
     entity_cache.pop("obs_keys_size", None)
+    # why: obs_keys (a dict of dedup sets) can be many MiB; free it on clear
+    # so eviction actually drops below MAX_CACHE_BYTES.
+    entity_cache.pop("obs_keys", None)
 
 
 def clear_relation_cache():
