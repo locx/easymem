@@ -735,11 +735,12 @@ def list_decisions(memory_dir, stale_days=None, limit=50):
             continue
         obs = info.get("observations", [])
         outcome = "pending"
+        # why: outcomes are append-only; the LAST 'Outcome: ' line is the
+        # current one. Breaking on the first reports a stale 'pending'.
         for o in obs:
             if isinstance(o, str) \
                     and o.startswith("Outcome: "):
                 outcome = o[9:]
-                break
         updated = info.get("_updated", "")
 
         if stale_days is not None:

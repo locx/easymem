@@ -132,14 +132,20 @@ def mint_error(input_path: str, graph_path: str) -> None:
             data = json.load(f)
     except Exception:
         return
-    err = (data.get("tool_response", {}).get("error")
-           or data.get("tool_response", {}).get("stderr", "")).strip()
+    # why: tool_response/tool_input may be absent or non-dict — coerce so a
+    # malformed hook payload can't crash the PostToolUse hook.
+    tr = data.get("tool_response")
+    tr = tr if isinstance(tr, dict) else {}
+    err = str(tr.get("error") or tr.get("stderr", "") or "").strip()
     if not err:
         return
     tool = data.get("tool_name", "")
-    target = (data.get("tool_input", {}).get("file_path")
-              or data.get("tool_input", {}).get("command", ""))[:200]
-    target = _scrub(target)
+    ti = data.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    # why: scrub before truncating so a secret straddling the 200-char cut
+    # can't survive as an unmatched partial.
+    target = str(ti.get("file_path") or ti.get("command", "") or "")
+    target = _scrub(target)[:200]
     err = _scrub(err)
     stable_key = f"{target}|{err[:200]}"
     name = f"episode:err:{_sha8(stable_key)}"
@@ -167,7 +173,11 @@ def mint_churn(input_path: str, graph_path: str) -> None:
     tool = data.get("tool_name", "")
     if tool not in ("Edit", "Write"):
         return
-    fp = data.get("tool_input", {}).get("file_path", "")
+    # why: tool_input may be absent or non-dict — coerce so a malformed
+    # payload can't crash the hook.
+    ti = data.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    fp = ti.get("file_path", "")
     if not fp:
         return
     sid = os.environ.get("CLAUDE_SESSION_ID", "unknown")
@@ -190,6 +200,13 @@ def mint_churn(input_path: str, graph_path: str) -> None:
                 os.unlink(marker)
             except OSError:
                 pass
+    except OSError:
+        pass
+    # Reset a stale counter so edits separated by more than the window
+    # don't accumulate into a false rapid-churn mint.
+    try:
+        if _time_mod.time() - os.path.getmtime(marker) >= CHURN_WINDOW_S:
+            os.unlink(marker)
     except OSError:
         pass
     try:
@@ -374,9 +391,9 @@ def main():
     if tool not in ('Edit', 'Write'):
         sys.exit(0)
 
-    file_path = data.get('tool_input', {}).get(
-        'file_path', '?'
-    )
+    ti = data.get('tool_input')
+    ti = ti if isinstance(ti, dict) else {}
+    file_path = ti.get('file_path', '?')
     session_id = os.environ.get(
         'CLAUDE_SESSION_ID', 'unknown'
     )

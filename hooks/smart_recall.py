@@ -102,19 +102,25 @@ def _get_active_files(project_dir):
             ["git", "-C", project_dir, "status", "-s"],
             text=True, stderr=subprocess.DEVNULL, timeout=1.0
         )
-        files = []
-        for line in out.splitlines():
-            if len(line) > 3:
-                path = line[3:].strip()
-                basename = os.path.basename(path)
-                if basename:
-                    files.append(basename.lower())
-        result = set(files)
     except Exception:
-        result = set()
+        # why: don't cache an empty set on git failure/timeout — that would
+        # suppress active-file priming for the whole 60s cache window.
+        return set()
+    files = []
+    for line in out.splitlines():
+        if len(line) > 3:
+            path = line[3:].strip()
+            basename = os.path.basename(path)
+            if basename:
+                files.append(basename.lower())
+    result = set(files)
+    # why: unique temp + atomic replace so a concurrent SessionStart hook
+    # never reads a half-written cache.
     try:
-        with open(cache_file, "w", encoding="utf-8") as f:
+        tmp = f"{cache_file}.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(list(result), f)
+        os.replace(tmp, cache_file)
     except OSError:
         pass
     return result
@@ -417,8 +423,13 @@ def _main_body(memory_dir, compact):
     recall_counts = _read_recall_counts(memory_dir)
     now_ts = time.time()
     active_files = _get_active_files(project_dir)
+    # why: filename boundaries so "a.py" doesn't match inside "data.py";
+    # a path separator before the name still counts (src/a.py).
     active_pat = (
-        re.compile("|".join(re.escape(f) for f in active_files))
+        re.compile(
+            r"(?<![\w.\-])(?:%s)(?![\w.\-])"
+            % "|".join(re.escape(f) for f in active_files)
+        )
         if active_files else None
     )
 

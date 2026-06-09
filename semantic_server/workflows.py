@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 
 MAX_WORKFLOW_EPISODES = 50
+# Episode cap alone can't bound runtime when nothing clusters
+# (C(50,25) ≈ 1e14); hard-cap combinations actually examined.
+_MAX_COMBINATIONS = 200_000
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -58,8 +61,14 @@ def extract_workflows(
 
     eps.sort(key=lambda e: e[0], reverse=True)
 
+    examined = 0
     for r in range(len(eps), min_episodes - 1, -1):
+        if examined > _MAX_COMBINATIONS:
+            break
         for combo in combinations(eps, r):
+            examined += 1
+            if examined > _MAX_COMBINATIONS:
+                break
             if any(name in used for name, _, _ in combo):
                 continue
             shared_obs = set.intersection(*(o for _, o, _ in combo))
@@ -70,7 +79,11 @@ def extract_workflows(
                 continue
             members = [name for name, _, _ in combo]
             key = '+'.join(sorted(shared_neigh))
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+            # why: include members so disjoint clusters that share an
+            # identical neighbor set don't collide on one workflow name.
+            digest = hashlib.sha256(
+                (key + "|" + "+".join(sorted(members))).encode("utf-8")
+            ).hexdigest()[:8]
             wf_name = f"workflow:{key[:64]}#{digest}"
             workflows.append({
                 "name": wf_name,

@@ -90,12 +90,13 @@ def get_graph_mtime(memory_dir):
 _MAX_RAW_LINE_BYTES = MAX_INPUT_CHARS * 4
 
 
-def _iter_graph_lines(f, start_offset, max_incr_bytes, deadline):
+def _iter_graph_lines(f, start_offset, max_incr_bytes, deadline, aborted):
     line_count = 0
     for raw in f:
         end_offset = f.tell()
         if (end_offset - start_offset > max_incr_bytes):
             sys.stderr.write("warn: incremental read byte budget exceeded\n")
+            aborted[0] = True
             break
         if len(raw) > _MAX_RAW_LINE_BYTES:
             continue
@@ -111,6 +112,7 @@ def _iter_graph_lines(f, start_offset, max_incr_bytes, deadline):
         line_count += 1
         if line_count % 1000 == 0 and time.monotonic() > deadline:
             sys.stderr.write(f"warn: parse time budget exceeded after {line_count} lines\n")
+            aborted[0] = True
             break
         yield line, end_offset
 
@@ -204,13 +206,16 @@ def _parse_graph_file(graph_path, start_offset=0, seed_obs_keys=None):
     obs_keys = dict(seed_obs_keys) if seed_obs_keys else {}
     deadline = time.monotonic() + PARSE_TIME_BUDGET
     end_offset = start_offset
+    aborted = [False]
     max_incr_bytes = MAX_GRAPH_BYTES if start_offset == 0 \
         else min(MAX_GRAPH_BYTES, 10_000_000)
     try:
         with open(graph_path, "rb") as f:
             if start_offset > 0:
                 f.seek(start_offset)
-            for line, offset in _iter_graph_lines(f, start_offset, max_incr_bytes, deadline):
+            for line, offset in _iter_graph_lines(
+                f, start_offset, max_incr_bytes, deadline, aborted,
+            ):
                 end_offset = offset
                 try:
                     obj = _fast_loads(line)
@@ -224,12 +229,12 @@ def _parse_graph_file(graph_path, start_offset=0, seed_obs_keys=None):
                 except (json.JSONDecodeError, ValueError):
                     continue
     except OSError:
-        return None, None, None, 0
+        return None, None, None, 0, False
     # Trim obs_keys to entities actually present
     for name in list(obs_keys):
         if name not in entities:
             obs_keys.pop(name, None)
-    return entities, relations, obs_keys, end_offset
+    return entities, relations, obs_keys, end_offset, aborted[0]
 
 
 def _do_full_parse(graph_path, mtime):
@@ -237,14 +242,19 @@ def _do_full_parse(graph_path, mtime):
     # why: reset stale truncated flag from a prior parse; _handle_entity_entry
     # will set it back to True if this parse also hits the cap.
     entity_cache["truncated"] = False
-    entities, relations, obs_keys, offset = _parse_graph_file(graph_path)
+    entities, relations, obs_keys, offset, aborted = \
+        _parse_graph_file(graph_path)
     if entities is None:
         clear_entity_cache()
         clear_relation_cache()
         return {}, []
 
     entity_cache["data"] = entities
-    entity_cache["mtime"] = mtime
+    # why: a budget-aborted parse is incomplete — mark truncated so a rewrite
+    # can't persist the partial set, and store no matching mtime so the next
+    # load retries instead of serving the partial set as authoritative.
+    entity_cache["truncated"] = aborted or entity_cache.get("truncated", False)
+    entity_cache["mtime"] = None if aborted else mtime
     entity_cache["path"] = graph_path
     entity_cache["size"] = estimate_size(entities)
     entity_cache["offset"] = offset
@@ -259,7 +269,9 @@ def _do_full_parse(graph_path, mtime):
     entity_cache["obs_keys_size"] = None
     entity_cache.pop("_pre_invalidate_mtime", None)
     relation_cache["data"] = relations
-    relation_cache["mtime"] = mtime
+    # why: like the entity side, an aborted parse yields partial relations —
+    # store no matching mtime so the next relation load re-parses.
+    relation_cache["mtime"] = None if aborted else mtime
     relation_cache["path"] = graph_path
     relation_cache["size"] = estimate_size(relations)
     maybe_evict_caches()
@@ -314,6 +326,11 @@ def _merge_incremental_data(existing_ents, existing_obs_keys,
             _merge_ts(prev, info.get("_created", ""), info.get("_updated", ""))
             existing_ents[name] = prev
         else:
+            if len(existing_ents) >= MAX_ENTITY_COUNT:
+                # why: enforce the cap on the merged total, not just the
+                # delta, so incremental reads can't grow past it silently.
+                entity_cache["truncated"] = True
+                continue
             existing_ents[name] = info
             # Reuse obs_keys produced by parser when available
             existing_obs_keys[name] = (
@@ -332,7 +349,9 @@ def _merge_incremental_data(existing_ents, existing_obs_keys,
         ]
         if added:
             relation_cache["data"].extend(added)
-            relation_cache["size"] += estimate_size(added)
+            # why: add only per-element bytes; estimate_size(list) re-adds the
+            # container overhead each merge, inflating the accounted size.
+            relation_cache["size"] += sum(estimate_size(r) for r in added)
 
 
 def _try_incremental_load(graph_path, mtime, prev_offset):
@@ -355,7 +374,7 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
         return None
 
     existing_obs_keys = entity_cache.get("obs_keys") or {}
-    new_ents, new_rels, new_obs_keys, offset = _parse_graph_file(
+    new_ents, new_rels, new_obs_keys, offset, aborted = _parse_graph_file(
         graph_path, start_offset=prev_offset,
     )
     if new_ents is None:
@@ -366,12 +385,19 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
     # why: merge into a copy and swap so a concurrent reader holding the
     # prior dict never observes a half-merged state.
     existing = dict(entity_cache["data"])
+    # why: clear a stale truncation flag from a prior capped full parse;
+    # the merge re-sets it if the merged total is still over cap.
+    entity_cache["truncated"] = False
     _merge_incremental_data(
         existing, existing_obs_keys,
         new_ents, new_obs_keys or {}, new_rels,
     )
     entity_cache["data"] = existing
-    entity_cache["mtime"] = mtime
+    # why: a budget-aborted delta is incomplete — don't stamp a matching
+    # mtime (force re-read) and block rewrites until a full parse completes.
+    if aborted:
+        entity_cache["truncated"] = True
+    entity_cache["mtime"] = None if aborted else mtime
     entity_cache["offset"] = offset
     entity_cache["size"] = estimate_size(existing)
     entity_cache["append_only"] = False
@@ -381,7 +407,15 @@ def _try_incremental_load(graph_path, mtime, prev_offset):
     if relation_cache["data"] is not None:
         relation_cache["mtime"] = mtime
     if new_rels:
-        adjacency_cache.update(outbound=None, inbound=None, mtime=0.0)
+        # why: zero size too, else _cache_total keeps counting phantom
+        # bytes until the next traversal rebuild and may over-evict.
+        adjacency_cache.update(
+            outbound=None, inbound=None, mtime=0.0, size=0
+        )
+    elif adjacency_cache.get("outbound") is not None:
+        # why: relations unchanged — keep adjacency valid for the new mtime
+        # so the next traversal doesn't needlessly rebuild it.
+        adjacency_cache["mtime"] = mtime
     maybe_evict_caches()
     return existing
 
@@ -439,14 +473,15 @@ def load_graph_relations(memory_dir):
 
 class GraphLock:
     """Exclusive graph file lock with timeout."""
-    __slots__ = ("_fd", "_path", "acquired")
+    __slots__ = ("_fd", "_path", "acquired", "_timeout")
 
-    def __init__(self, memory_dir):
+    def __init__(self, memory_dir, timeout=None):
         self._path = os.path.join(
             memory_dir, ".graph.lock"
         )
         self._fd = None
         self.acquired = False
+        self._timeout = timeout
 
     def __enter__(self):
         if fcntl is None:
@@ -468,8 +503,10 @@ class GraphLock:
         # try/finally so signals (KeyboardInterrupt etc.) don't leak the fd.
         try:
             delay = 0.01
-            deadline = time.monotonic() + GRAPH_LOCK_TIMEOUT
-            while time.monotonic() < deadline:
+            timeout = (GRAPH_LOCK_TIMEOUT if self._timeout is None
+                       else self._timeout)
+            deadline = time.monotonic() + timeout
+            while True:
                 try:
                     fcntl.flock(
                         self._fd,
@@ -478,12 +515,17 @@ class GraphLock:
                     self.acquired = True
                     return self
                 except (IOError, OSError):
+                    if time.monotonic() >= deadline:
+                        break
                     time.sleep(delay)
                     delay = min(delay * 2, 0.5)
-            sys.stderr.write(
-                "warn: graph lock timeout after "
-                f"{GRAPH_LOCK_TIMEOUT}s\n"
-            )
+            # why: a zero-timeout try-once skip is expected under contention;
+            # only warn when a real wait actually elapsed.
+            if timeout > 0:
+                sys.stderr.write(
+                    "warn: graph lock timeout after "
+                    f"{timeout}s\n"
+                )
         finally:
             if not self.acquired and self._fd is not None:
                 self._fd.close()

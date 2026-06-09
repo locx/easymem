@@ -96,10 +96,13 @@ def save_index(
     # np.savez_compressed auto-appends ".npz"; keep tmp suffix explicit
     # so os.replace finds the actual on-disk filename.
     tmp = path + ".tmp.npz"
+    # why: size the name field to the data over a 256 floor; deep paths and
+    # long symbols exceed it and would silently truncate, dropping their hits.
+    width = max(int(_NAME_DTYPE[1:]), max((len(n) for n in names), default=0))
     np.savez_compressed(
         tmp,
         vecs=vecs.astype(np.int8),
-        names=np.array(names, dtype=_NAME_DTYPE),
+        names=np.array(names, dtype=f"U{width}"),
         model=np.array(model_id, dtype=_MODEL_DTYPE),
         dim=np.int32(EMBED_DIM),
     )
@@ -166,7 +169,12 @@ def vector_search(
         idx["vecs"].astype(np.int32)
         @ q_int8[0].astype(np.int32)
     ) / (127.0 * 127.0)
-    top = np.argsort(-scores)[:top_k]
+    if top_k < scores.shape[0]:
+        # why: O(N) partition to select top_k, then sort only those.
+        cand = np.argpartition(-scores, top_k)[:top_k]
+        top = cand[np.argsort(-scores[cand])]
+    else:
+        top = np.argsort(-scores)
     # Floor: near-zero / negative similarities are noise; allowing them
     # into RRF fusion lets vector misfires outrank legitimate hits.
     return [

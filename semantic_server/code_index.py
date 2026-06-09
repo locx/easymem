@@ -474,14 +474,10 @@ def index_project(memory_dir: str, project_root: str,
     }
 
 
-def code_scan_is_stale(memory_dir: str, project_root: str) -> bool:
-    stamp = Path(memory_dir) / "code-stamp"
-    try:
-        stamp_mtime = stamp.stat().st_mtime
-    except OSError:
-        return True
-    root = Path(project_root).resolve()
-    excl = DEFAULT_EXCLUDES
+def _iter_source_files(root: Path, excludes=None):
+    # why: mirror scan_project's filters (excludes + size cap) so the
+    # staleness/stamp file set matches what index_project actually indexes.
+    excl = excludes if excludes is not None else DEFAULT_EXCLUDES
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in excl
                        and not d.startswith(".")]
@@ -490,14 +486,57 @@ def code_scan_is_stale(memory_dir: str, project_root: str) -> bool:
                 continue
             if detect_language(fname) is None:
                 continue
+            p = Path(dirpath) / fname
             try:
-                if (Path(dirpath) / fname).stat().st_mtime > stamp_mtime:
-                    return True
+                if p.stat().st_size > MAX_FILE_BYTES:
+                    continue
             except OSError:
                 continue
-    return False
+            yield p
 
 
-def touch_code_stamp(memory_dir: str) -> None:
+def _source_signature(rel_paths) -> str:
+    import hashlib
+    joined = "\n".join(sorted(rel_paths))
+    h = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:16]
+    return f"{len(rel_paths)}:{h}"
+
+
+def code_scan_is_stale(memory_dir: str, project_root: str,
+                       excludes=None) -> bool:
     stamp = Path(memory_dir) / "code-stamp"
-    stamp.write_text("")
+    try:
+        stamp_mtime = stamp.stat().st_mtime
+    except OSError:
+        return True
+    root = Path(project_root).resolve()
+    try:
+        prev_sig = stamp.read_text().strip()
+    except OSError:
+        prev_sig = ""
+    rel_paths = []
+    newer = False
+    for p in _iter_source_files(root, excludes):
+        rel_paths.append(str(p.relative_to(root)))
+        try:
+            if p.stat().st_mtime > stamp_mtime:
+                newer = True
+        except OSError:
+            continue
+    if newer:
+        return True
+    # why: a path-set signature catches deletions/renames that leave no
+    # surviving file with an mtime newer than the stamp.
+    return _source_signature(rel_paths) != prev_sig
+
+
+def touch_code_stamp(memory_dir: str, project_root: str = None,
+                     excludes=None) -> None:
+    stamp = Path(memory_dir) / "code-stamp"
+    if project_root is None:
+        stamp.write_text("")
+        return
+    root = Path(project_root).resolve()
+    rel_paths = [str(p.relative_to(root))
+                 for p in _iter_source_files(root, excludes)]
+    stamp.write_text(_source_signature(rel_paths))

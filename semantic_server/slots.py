@@ -68,6 +68,8 @@ def get_slot(memory_dir: str, key: str) -> str:
 def set_slot(memory_dir: str, key: str, value: str) -> None:
     if key not in SLOT_KEYS:
         raise ValueError(f"unknown slot key: {key!r}")
+    if not isinstance(value, str):
+        raise TypeError("slot value must be str")
     with _slot_lock(memory_dir):
         data = _read(memory_dir)
         data[key] = value

@@ -25,6 +25,9 @@ _recall_lock = threading.Lock()
 # why: on transient read error, preserve in-memory counts and disable flush —
 # resetting to {} then flushing would permanently wipe disk history.
 _load_failed = False
+# why: increments not yet flushed, re-applied after a cross-process reload so
+# an authoritative file replace can't silently drop local recall counts.
+_unflushed: dict = {}
 
 
 def init_recall_state(memory_dir):
@@ -33,6 +36,7 @@ def init_recall_state(memory_dir):
     recall_path = os.path.join(
         memory_dir, "recall_counts.json"
     )
+    _unflushed.clear()
     # Sweep orphaned .tmp from prior crash
     tmp_path = recall_path + ".tmp"
     try:
@@ -88,6 +92,9 @@ def maybe_reload_recall_counts():
                 for k, v in data.items():
                     if isinstance(k, str) and isinstance(v, (int, float)):
                         recall_counts[k] = v
+                # Re-apply increments the reloaded file snapshot predates.
+                for k, dv in _unflushed.items():
+                    recall_counts[k] = recall_counts.get(k, 0) + dv
             recall_mtime = mtime
             _load_failed = False
         except (OSError, json.JSONDecodeError, ValueError):
@@ -103,8 +110,12 @@ def record_recalls(entity_names):
                 recall_counts.get(name, 0) + 1
             )
             recall_counts.move_to_end(name)
+            _unflushed[name] = _unflushed.get(name, 0) + 1
         while len(recall_counts) > MAX_RECALL_ENTRIES:
-            recall_counts.popitem(last=False)
+            evicted, _ = recall_counts.popitem(last=False)
+            # why: bound _unflushed with recall_counts and stop an evicted
+            # entry from being resurrected by a later cross-process reload.
+            _unflushed.pop(evicted, None)
         recall_dirty = True
 
 
@@ -122,6 +133,7 @@ def flush_recall_counts():
             return
         recall_last_flush = time.monotonic()
         snapshot = dict(recall_counts)
+        flushed = dict(_unflushed)
         recall_dirty = False
 
     tmp = recall_path + ".tmp"
@@ -135,11 +147,23 @@ def flush_recall_counts():
             new_mtime = os.path.getmtime(recall_path)
         except OSError:
             new_mtime = None
-        if new_mtime is not None:
-            with _recall_lock:
+        with _recall_lock:
+            if new_mtime is not None:
                 recall_mtime = new_mtime
+            # why: drop only the deltas this flush persisted; increments
+            # recorded since the snapshot stay pending for the next flush.
+            for k, v in flushed.items():
+                rem = _unflushed.get(k, 0) - v
+                if rem > 0:
+                    _unflushed[k] = rem
+                else:
+                    _unflushed.pop(k, None)
     except OSError:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        # why: write failed — re-arm so the next tick (and atexit) retries
+        # instead of silently dropping the still-in-memory counts.
+        with _recall_lock:
+            recall_dirty = True

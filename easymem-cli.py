@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 
 # Add script's own directory to path
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -158,6 +159,10 @@ def _parse_positional(args):
                     f"got {args[i]!r}",
                     file=sys.stderr,
                 )
+        elif arg in flag_spec:
+            # why: a known flag as the trailing arg has no value — warn
+            # instead of silently dropping it.
+            print(f"Warning: {arg} requires a value", file=sys.stderr)
         elif not arg.startswith("--"):
             positionals.append(arg)
         i += 1
@@ -335,6 +340,9 @@ def _check_vector_layer(issues):
             except subprocess.TimeoutExpired:
                 rc = -1
                 issues.append("model2vec import probe timed out")
+            except OSError:
+                rc = -1
+                issues.append(f"venv python not runnable at {venv_py}")
             if rc != 0:
                 issues.append("model2vec import failed in venv")
                 status["venv"] = "import_failed"
@@ -714,18 +722,42 @@ def _write_aliases(memory_dir, groups):
     os.replace(tmp, path)
 
 
+@contextmanager
+def _aliases_lock(memory_dir):
+    # why: serialize alias read-modify-write so concurrent add/remove don't
+    # lose updates (the last os.replace would otherwise win).
+    try:
+        import fcntl as _fcntl
+    except ImportError:
+        _fcntl = None
+    os.makedirs(memory_dir, exist_ok=True)
+    if _fcntl is None:
+        yield
+        return
+    with open(os.path.join(memory_dir, ".aliases.lock"), "a") as lf:
+        _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            try:
+                _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
 def _cmd_aliases_add(memory_dir, words):
     if len(words) < 2:
         return {"error": "need canonical + at least one synonym"}
     new_group = [w.lower().strip() for w in words if w.strip()]
     canonical = new_group[0]
-    groups = _read_aliases(memory_dir)
-    # Replace any existing group with same canonical
-    groups = [g for g in groups
-              if not (isinstance(g, list) and g and
-                      str(g[0]).lower().strip() == canonical)]
-    groups.append(new_group)
-    _write_aliases(memory_dir, groups)
+    with _aliases_lock(memory_dir):
+        groups = _read_aliases(memory_dir)
+        # Replace any existing group with same canonical
+        groups = [g for g in groups
+                  if not (isinstance(g, list) and g and
+                          str(g[0]).lower().strip() == canonical)]
+        groups.append(new_group)
+        _write_aliases(memory_dir, groups)
     return {"added": new_group, "total_groups": len(groups)}
 
 
@@ -735,11 +767,12 @@ def _cmd_aliases_list(memory_dir):
 
 def _cmd_aliases_remove(memory_dir, canonical):
     target = canonical.lower().strip()
-    groups = _read_aliases(memory_dir)
-    kept = [g for g in groups
-            if not (isinstance(g, list) and g and
-                    str(g[0]).lower().strip() == target)]
-    _write_aliases(memory_dir, kept)
+    with _aliases_lock(memory_dir):
+        groups = _read_aliases(memory_dir)
+        kept = [g for g in groups
+                if not (isinstance(g, list) and g and
+                        str(g[0]).lower().strip() == target)]
+        _write_aliases(memory_dir, kept)
     return {"removed": target, "remaining": len(kept)}
 
 
@@ -811,6 +844,9 @@ def _cmd_index_code(args, memory_dir):
     from semantic_server.code_index import index_project
     project_root = args[0] if args else os.getcwd()
     result = index_project(memory_dir, project_root)
+    if result.get("error"):
+        print(f"index-code failed: {result['error']}", file=sys.stderr)
+        return 1
     print(
         f"indexed: {result['indexed']} files, "
         f"{result['symbols']} symbols, "

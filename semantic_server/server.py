@@ -53,11 +53,11 @@ _last_mtime_seen = 0.0
 _last_mtime_time = 0.0
 
 @contextmanager
-def _strict_graph_lock(memory_dir):
+def _strict_graph_lock(memory_dir, timeout=None):
     # why: fcntl-based on .graph.lock so CLI/maintenance/hooks/append_jsonl
     # writers all serialize against the server. The old threading.Lock here
     # was in-process only and didn't see cross-process writers.
-    with GraphLock(memory_dir) as _lock:
+    with GraphLock(memory_dir, timeout=timeout) as _lock:
         if not _lock.acquired:
             raise OSError("graph lock timeout")
         yield
@@ -87,7 +87,7 @@ def _merge_pending(memory_dir):
             memory_dir,
             graph_path,
             pending_path,
-            lock=_strict_graph_lock(memory_dir),
+            lock=_strict_graph_lock(memory_dir, timeout=0),
             invalidate_cb=_invalidate_both,
         )
     except OSError as exc:

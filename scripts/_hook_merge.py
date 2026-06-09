@@ -46,9 +46,13 @@ def _load(path):
         # why: returning {} would let _dump overwrite the user's whole
         # settings.json with hooks-only — silent total loss.
         import shutil
-        shutil.copy2(path, path + '.bak')
+        # why: timestamped backup + rotation so a prior backup isn't
+        # clobbered, matching _dump's scheme.
+        backup = f'{path}.bak-{int(time.time())}'
+        shutil.copy2(path, backup)
+        _rotate_backups(path)
         print(
-            f'  [error] {path} is corrupt — backed up to {path}.bak; '
+            f'  [error] {path} is corrupt — backed up to {backup}; '
             f'inspect and re-run',
             file=sys.stderr,
         )
@@ -150,6 +154,11 @@ def main():
     ap.add_argument('--timeout', type=int, default=None)
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
+
+    if args.mode == 'add' and (not args.event or not args.hook_file):
+        print('  [error] --mode add requires --event and --hook-file',
+              file=sys.stderr)
+        sys.exit(2)
 
     if not os.path.isfile(args.settings):
         if args.mode == 'add':

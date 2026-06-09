@@ -17,6 +17,7 @@ The resolver therefore:
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from semantic_server.maintenance_utils import (
@@ -100,6 +101,11 @@ def test_user_source_not_auto_resolved():
 def test_maintenance_persists_resolution(tmp_path):
     mem = tmp_path / ".easymem"
     mem.mkdir()
+    # why: relative-to-now so the episode survives the 14-day prune window
+    # and the run actually exercises persistence (not wall-clock dependent).
+    recent = (datetime.now(timezone.utc) - timedelta(days=3)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     line = json.dumps({
         "type": "entity",
         "name": "SyncManager",
@@ -109,8 +115,8 @@ def test_maintenance_persists_resolution(tmp_path):
             "SyncManager no longer uses LWW conflict resolution",
         ],
         "_source": "episode:claude:1",
-        "_created": "2026-05-01T00:00:00Z",
-        "_updated": "2026-05-15T00:00:00Z",
+        "_created": recent,
+        "_updated": recent,
     })
     (mem / "graph.jsonl").write_text(line + "\n")
 

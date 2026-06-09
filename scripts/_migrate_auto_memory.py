@@ -26,9 +26,12 @@ def _existing_names(graph_path: str) -> set:
                 continue
             try:
                 rec = json.loads(line)
-                if rec.get("type") == "entity":
+                # why: a valid-JSON non-dict (bare scalar) would raise on
+                # .get — skip it like the other JSONL readers do.
+                if isinstance(rec, dict) and rec.get("type") == "entity" \
+                        and "name" in rec:
                     names.add(rec["name"])
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, ValueError):
                 pass
     return names
 
@@ -97,10 +100,27 @@ def migrate(auto_mem_dir: str, graph_path: str) -> int:
         migrated += 1
     # why: one fsync after the batch instead of O(n) per-entity syncs.
     if lines:
-        with open(graph_path, "a", encoding="utf-8") as f:
-            f.writelines(lines)
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            import fcntl as _fcntl
+        except ImportError:
+            _fcntl = None
+        lock_path = os.path.join(os.path.dirname(graph_path), ".graph.lock")
+        # why: hold .graph.lock so this append can't race a concurrent
+        # server/CLI rewrite that would otherwise drop it.
+        lf = open(lock_path, "a") if _fcntl is not None else None
+        try:
+            if lf is not None:
+                _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+            with open(graph_path, "a", encoding="utf-8") as f:
+                f.writelines(lines)
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            if lf is not None:
+                try:
+                    _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+                finally:
+                    lf.close()
     return migrated
 
 

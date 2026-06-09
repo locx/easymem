@@ -184,7 +184,21 @@ def _tokenize_docs(entities, alias_map):
             }
     return docs, meta, df, obs_to_entity
 
-def build_tfidf_index(entities, easymem_dir):
+
+_DIRTY_ALWAYS_CLEAR = object()
+
+
+def _dirty_marker_token(easymem_dir):
+    # mtime_ns of .index-dirty (None if absent) — lets the indexer detect a
+    # concurrent writer that re-marked the index stale after the snapshot.
+    try:
+        path = os.path.join(easymem_dir, ".index-dirty")
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def build_tfidf_index(entities, easymem_dir, dirty_token=_DIRTY_ALWAYS_CLEAR):
     """Build TF-IDF index with magnitudes, postings, metadata.
 
     Two-pass: tokenize + DF, then TF-IDF vectors. Filters
@@ -291,12 +305,15 @@ def build_tfidf_index(entities, easymem_dir):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, index_path)
-        # Clear dirty marker if present
+        # why: only clear the marker if no writer re-marked it since the
+        # snapshot, else we'd erase a still-valid stale-index signal.
         dirty = os.path.join(easymem_dir, ".index-dirty")
-        try:
-            os.unlink(dirty)
-        except OSError:
-            pass
+        if (dirty_token is _DIRTY_ALWAYS_CLEAR
+                or _dirty_marker_token(easymem_dir) == dirty_token):
+            try:
+                os.unlink(dirty)
+            except OSError:
+                pass
     except BaseException:
         try:
             os.unlink(tmp)
@@ -584,7 +601,7 @@ def _finalize_maintenance(easymem_dir, entities, recall_counts, pruned, merged):
     if code_scan_is_stale(easymem_dir, project_dir):
         try:
             index_project(easymem_dir, project_dir)
-            touch_code_stamp(easymem_dir)
+            touch_code_stamp(easymem_dir, project_dir)
         except Exception as exc:
             print(f"code scan skipped: {exc}", file=sys.stderr)
     rebuild_index(easymem_dir)
@@ -713,6 +730,7 @@ def rebuild_index(easymem_dir):
     lock_fd = _acquire_lock(easymem_dir)
     if lock_fd is None:
         return 0
+    empty = False
     try:
         try:
             entities, relations, others = partition_graph(graph_path)
@@ -720,25 +738,33 @@ def rebuild_index(easymem_dir):
             print(f"rebuild_index: failed to load graph: {exc}",
                   file=sys.stderr)
             return 0
+        # Snapshot the marker under lock so a writer racing after release
+        # can't have its stale-mark cleared by this rebuild.
+        dirty_token = _dirty_marker_token(easymem_dir)
         if not entities:
-            return 0
-        entities = stamp_metadata(entities, branch)
-        # Refuse the rewrite if backup fails or the result would be
-        # an empty graph (guards against partial-corruption truncation).
-        if _backup_graph(graph_path):
-            try:
-                write_jsonl(
-                    graph_path,
-                    chain(entities, relations, others),
-                )
-            except (OSError, MemoryError) as exc:
-                # Bak is left on disk for recovery; surface the failure
-                # so callers don't trust the in-memory snapshot.
-                print(f"rebuild_index: write failed: {exc}",
-                      file=sys.stderr)
+            empty = True
+        else:
+            entities = stamp_metadata(entities, branch)
+            # Refuse the rewrite if backup fails or the result would be
+            # an empty graph (guards against partial-corruption truncation).
+            if _backup_graph(graph_path):
+                try:
+                    write_jsonl(
+                        graph_path,
+                        chain(entities, relations, others),
+                    )
+                except (OSError, MemoryError) as exc:
+                    # Bak is left on disk for recovery; surface the failure
+                    # so callers don't trust the in-memory snapshot.
+                    print(f"rebuild_index: write failed: {exc}",
+                          file=sys.stderr)
     finally:
         _release_lock(lock_fd)
 
+    if empty:
+        # why: clear the now-stale index so search stops returning entities
+        # that were all pruned/deleted.
+        return build_tfidf_index([], easymem_dir, dirty_token)
     index_input = [
         {"name": e.get("name", ""),
          "entityType": e.get("entityType", ""),
@@ -746,7 +772,7 @@ def rebuild_index(easymem_dir):
          "_branch": e.get("_branch", "")}
         for e in entities
     ]
-    return build_tfidf_index(index_input, easymem_dir)
+    return build_tfidf_index(index_input, easymem_dir, dirty_token)
 
 
 if __name__ == "__main__":

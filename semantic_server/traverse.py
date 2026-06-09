@@ -2,6 +2,7 @@
 from .cache import (
     adjacency_cache,
     estimate_size,
+    maybe_evict_caches,
     relation_cache,
 )
 from .graph import (
@@ -43,6 +44,9 @@ def _get_adjacency(memory_dir):
     adjacency_cache["size"] = (
         estimate_size(outbound) + estimate_size(inbound)
     )
+    # why: account the new adjacency bytes against the cap now, matching the
+    # eviction discipline in graph.py's parse paths.
+    maybe_evict_caches()
     return outbound, inbound
 
 
@@ -66,13 +70,15 @@ def _expand_frontier(frontier, direction, outbound, inbound, visited, seen_edges
             # Skip self-loops before appending
             if target == node:
                 continue
-            edges.append({"from": fr, "to": to, "relationType": rt})
             if target not in visited:
                 if len(visited) >= _MAX_VISITED:
+                    # why: don't emit an edge to a node the cap excludes,
+                    # which would dangle with no corresponding node.
                     capped = True
                     continue
                 visited.add(target)
                 next_frontier.append(target)
+            edges.append({"from": fr, "to": to, "relationType": rt})
     return next_frontier, capped
 
 

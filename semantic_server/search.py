@@ -272,7 +272,9 @@ def _idf_rerank(query, fused, top_k, idf, current_entities, alias_map):
         return fused[:top_k]
     # why: corpus tokenization is identical across queries until the graph or
     # aliases change; memoize per entity instead of re-tokenizing each query.
-    cache_key = (_ec.get("mtime"), id(alias_map))
+    # why: id() can be recycled after GC; key on the alias cache's content
+    # version (mtime+dir) so a different alias map can't alias a stale entry.
+    cache_key = (_ec.get("mtime"), _alias_cache["mtime"], _alias_cache["dir"])
     if _corpus_tok_cache["key"] != cache_key:
         _corpus_tok_cache["key"] = cache_key
         _corpus_tok_cache["data"] = {}
