@@ -12,7 +12,6 @@ from collections import OrderedDict
 from .config import (
     MAX_RECALL_ENTRIES,
     RECALL_CHECK_INTERVAL,
-    RECALL_FLUSH_INTERVAL,
 )
 
 recall_counts = OrderedDict()

@@ -1,6 +1,5 @@
 """Contradiction detection in maintenance_utils."""
 import json
-from pathlib import Path
 
 from semantic_server.maintenance_utils import (
     detect_contradictions,

@@ -29,7 +29,6 @@ from .cache import index_cache
 from .graph import (
     GraphLock,
     load_index,
-    append_jsonl,
     invalidate_entity_cache_only,
     invalidate_relation_cache_only,
 )

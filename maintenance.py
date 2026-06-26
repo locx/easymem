@@ -39,7 +39,7 @@ except ImportError:
 from semantic_server.code_index import (
     index_project, code_scan_is_stale, touch_code_stamp,
 )
-from semantic_server.io_utils import iter_jsonl, partition_graph, write_jsonl, merge_pending
+from semantic_server.io_utils import partition_graph, write_jsonl, merge_pending
 from semantic_server.stem import stem_word as _stem
 from semantic_server.text import (
     make_bigrams as _make_bigrams,
@@ -53,7 +53,6 @@ from semantic_server.maintenance_utils import (
     consolidate,
     stamp_metadata,
     read_recall_counts,
-    parse_iso_date,
     score_entity,
     detect_contradictions,
     resolve_contradictions,

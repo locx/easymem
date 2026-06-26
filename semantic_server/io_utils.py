@@ -2,7 +2,6 @@
 
 Extracted from maintenance.py to standardize I/O across the codebase.
 """
-import json
 import logging
 import os
 from pathlib import Path

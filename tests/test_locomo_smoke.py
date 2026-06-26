@@ -6,6 +6,10 @@ import pytest
 from bench.locomo import load_locomo
 from bench.run import evaluate
 
+# why: tests run the bench CLI as a subprocess; derive the repo root from this
+# file so it works on CI checkouts, not just one machine's absolute path.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 @pytest.fixture
 def locomo_fixture(tmp_path):
@@ -124,7 +128,7 @@ def test_cli_locomo_runs_against_path(locomo_fixture, tmp_path):
          "--locomo-path", str(locomo_fixture),
          "--top-k", "5"],
         capture_output=True, text=True,
-        cwd="/Users/locx/projects/easy-memory-claude",
+        cwd=str(_REPO_ROOT),
     )
     assert out.returncode == 0, out.stderr
     import json
@@ -138,7 +142,7 @@ def test_cli_locomo_requires_path():
     out = subprocess.run(
         [sys.executable, "-m", "bench", "--dataset", "locomo"],
         capture_output=True, text=True,
-        cwd="/Users/locx/projects/easy-memory-claude",
+        cwd=str(_REPO_ROOT),
     )
     assert out.returncode != 0
     assert "--locomo-path" in (out.stderr + out.stdout)
@@ -149,7 +153,7 @@ def test_cli_synthetic_unchanged(tmp_path):
         [sys.executable, "-m", "bench",
          "--n-entities", "20", "--n-queries", "5"],
         capture_output=True, text=True,
-        cwd="/Users/locx/projects/easy-memory-claude",
+        cwd=str(_REPO_ROOT),
     )
     assert out.returncode == 0, out.stderr
     import json

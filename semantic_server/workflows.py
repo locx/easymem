@@ -1,6 +1,5 @@
 """Procedural-tier extraction: mint workflow entities from recurring episode clusters."""
 import hashlib
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 
