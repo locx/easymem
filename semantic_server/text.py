@@ -2,6 +2,7 @@
 
 Extracted from maintenance.py to centralize text processing.
 """
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,8 @@ _SECRET_RE = re.compile(
 _URL_CRED_RE = re.compile(
     r"(\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)[^/\s@]+(?=@)"
 )
+# why: detect an already-hashed token so re-scrubbing a URL password is a no-op (idempotent).
+_REDACTED_TOKEN_RE = re.compile(r"^\[REDACTED:[0-9a-f]{8}\]$")
 
 
 def scrub_secrets(s: str) -> str:
@@ -53,6 +56,29 @@ def scrub_secrets(s: str) -> str:
         return s
     s = _SECRET_RE.sub("[REDACTED]", s)
     return _URL_CRED_RE.sub(r"\g<1>[REDACTED]", s)
+
+
+def _secret_token(secret: str) -> str:
+    # why: hash so distinct secrets stay distinct tokens (no entity collapse)
+    # while a repeated secret still maps to the same token.
+    h = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+    return f"[REDACTED:{h}]"
+
+
+def scrub_identity(s: str) -> str:
+    """Scrub secrets from identity fields (names, relation endpoints) using
+    distinct hashed tokens so two secret-shaped names never collapse."""
+    if not s:
+        return s
+    # why: hash the URL password first so a secret-shaped password is captured
+    # in one pass; otherwise _SECRET_RE pre-redacts it and re-hashing breaks idempotency.
+    def _url_sub(m):
+        pwd = m.group(0)[len(m.group(1)):]
+        if _REDACTED_TOKEN_RE.match(pwd):
+            return m.group(0)
+        return m.group(1) + _secret_token(pwd)
+    s = _URL_CRED_RE.sub(_url_sub, s)
+    return _SECRET_RE.sub(lambda m: _secret_token(m.group(0)), s)
 
 
 def extract_date_stems(text: str) -> list[str]:

@@ -105,11 +105,12 @@ def _cache_total():
 
 
 def maybe_evict_caches():
-    """Evict caches by size (largest first) until under cap."""
+    """Evict caches largest-first until under cap; index evicted last."""
+    # why: re-read+re-parse of the index per query is the dominant cost, so it
+    # is lowest eviction priority; its bytes still count toward the cap.
     if _cache_total() <= MAX_CACHE_BYTES:
         return
     evictable = [
-        (index_cache, clear_index_cache),
         (adjacency_cache,
          lambda: adjacency_cache.update(
              outbound=None, inbound=None,
@@ -125,6 +126,7 @@ def maybe_evict_caches():
         ),
         reverse=True,
     )
+    evictable.append((index_cache, clear_index_cache))
     for cache, clear_fn in evictable:
         if cache["size"] > 0:
             clear_fn()

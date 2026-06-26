@@ -30,6 +30,10 @@ from .traverse import traverse_relations
 
 _log = logging.getLogger(__name__)
 
+# Bump when tools_schema.json's tool contract changes; lets clients/tests
+# detect drift without altering the JSON file's list shape.
+TOOLS_SCHEMA_VERSION = "1.0"
+
 # Load tool schemas from external JSON (292L data, not code)
 import importlib.resources as _res
 try:

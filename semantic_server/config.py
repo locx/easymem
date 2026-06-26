@@ -140,7 +140,21 @@ _project_dir = ""
 
 def _read_git_head(project_dir):
     """Read branch from .git/HEAD (<0.1ms)."""
-    git_head = os.path.join(project_dir, ".git", "HEAD")
+    git_dir = os.path.join(project_dir, ".git")
+    # why: in a worktree .git is a file ("gitdir: <path>"), not a dir; resolve
+    # it so HEAD reads the real git dir instead of falling back to "unknown".
+    if os.path.isfile(git_dir):
+        try:
+            with open(git_dir) as f:
+                first = f.read(4096).strip()
+        except OSError:
+            return ""
+        if first.startswith("gitdir:"):
+            resolved = first[len("gitdir:"):].strip()
+            if not os.path.isabs(resolved):
+                resolved = os.path.join(project_dir, resolved)
+            git_dir = resolved
+    git_head = os.path.join(git_dir, "HEAD")
     try:
         with open(git_head) as f:
             content = f.read(256).strip()

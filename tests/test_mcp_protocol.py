@@ -1,9 +1,10 @@
 """MCP JSON-RPC round-trip: initialize -> tools/list -> tools/call, plus
 per-call workspace_root resolution."""
 import json
+import importlib.resources as res
 
 from bench.run import evaluate
-from semantic_server.protocol import handle_message
+from semantic_server.protocol import TOOLS_SCHEMA_VERSION, handle_message
 
 
 def _seeded_workspace(tmp_path):
@@ -51,6 +52,17 @@ def test_tools_call_recall_with_workspace_root(tmp_path):
     payload = json.loads(resp["result"]["content"][0]["text"])
     names = [r["entity"] for r in payload.get("results", [])]
     assert "auth.py" in names
+
+
+def test_tools_schema_version_and_shape():
+    # Drift guard: the version pins the contract, and the JSON must stay a
+    # list of 16 tools so a future shape change trips this test.
+    assert TOOLS_SCHEMA_VERSION == "1.0"
+    with res.files("semantic_server").joinpath(
+            "tools_schema.json").open() as f:
+        schema = json.load(f)
+    assert isinstance(schema, list)
+    assert len(schema) == 16
 
 
 def test_unknown_tool_errors(tmp_path):

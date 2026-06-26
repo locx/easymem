@@ -55,6 +55,12 @@ def _sha8(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
 
 
+def _safe_token(s: str) -> str:
+    # why: confine session ids to a filesystem-safe set before they reach
+    # /tmp marker names.
+    return "".join(c if c.isalnum() or c in "_-" else "_" for c in s)[:64]
+
+
 def _iso_now() -> str:
     return _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime())
 
@@ -103,9 +109,28 @@ def _append_episode(graph_path: str, name: str,
     if _fcntl is not None:
         try:
             lock_fd = open(lock_path, "a")
-            _fcntl.flock(lock_fd.fileno(), _fcntl.LOCK_EX)
         except OSError:
-            if lock_fd is not None:
+            lock_fd = None
+        if lock_fd is not None:
+            # why: short deadline — a synchronous hook must not stall the user
+            # on contention; the durable .pending path catches deferred writes.
+            delay = 0.01
+            deadline = _time_mod.monotonic() + 0.5
+            acquired = False
+            while True:
+                try:
+                    _fcntl.flock(
+                        lock_fd.fileno(),
+                        _fcntl.LOCK_EX | _fcntl.LOCK_NB,
+                    )
+                    acquired = True
+                    break
+                except OSError:
+                    if _time_mod.monotonic() >= deadline:
+                        break
+                    _time_mod.sleep(delay)
+                    delay = min(delay * 2, 0.5)
+            if not acquired:
                 lock_fd.close()
                 lock_fd = None
     if _fcntl is not None and lock_fd is None:
@@ -198,9 +223,7 @@ def mint_churn(input_path: str, graph_path: str) -> None:
     if not fp:
         return
     sid = os.environ.get("CLAUDE_SESSION_ID", "unknown")
-    safe_sid = "".join(
-        c if c.isalnum() or c in "_-" else "_" for c in sid
-    )[:64]
+    safe_sid = _safe_token(sid)
     path_hash = _sha8(fp)
     marker = f"/tmp/.claude-easymem-churn-{safe_sid}-{path_hash}"
     sentinel = marker + ".minted"
@@ -277,10 +300,7 @@ def _check_file_warnings(graph_path, filename, session_id):
     if not filename or filename == '?':
         return ""
 
-    safe_sid = "".join(
-        c if c.isalnum() or c in ('_', '-')
-        else '_' for c in session_id
-    )[:64]
+    safe_sid = _safe_token(session_id)
     # Key marker by sha256 of full absolute path to avoid basename collisions
     abs_path = os.path.abspath(filename)
     path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]

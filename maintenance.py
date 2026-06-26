@@ -14,7 +14,6 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -124,17 +123,10 @@ _RE_WORDS = re.compile(r'\w+', re.UNICODE)
 
 def get_branch(cwd=None):
     """Get current git branch, or 'unknown'."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-            cwd=cwd,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return "unknown"
+    # why: share config's .git/HEAD reader so a detached HEAD yields the same
+    # sha[:12] scope here as at query time, not the unmatchable "HEAD".
+    from semantic_server.config import _read_git_head
+    return _read_git_head(cwd or os.getcwd()) or "unknown"
 
 
 def _tokenize_docs(entities, alias_map):

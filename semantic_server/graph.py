@@ -689,6 +689,37 @@ def append_jsonl(memory_dir, entries, do_fsync=True):
     return True
 
 
+def _sweep_orphan_temps(graph_path):
+    # why: a .new.<pid> temp is created before its writer acquires the lock,
+    # so unlinking under our lock could delete a live writer's temp. Only
+    # unlink when <pid> is provably dead; skip if alive or unparseable.
+    prefix = os.path.basename(graph_path) + ".new."
+    directory = os.path.dirname(graph_path) or "."
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        pid_str = rest.split(".", 1)[0]
+        if not pid_str.isdigit():
+            continue
+        try:
+            os.kill(int(pid_str), 0)
+            continue  # pid alive — not an orphan
+        except ProcessLookupError:
+            pass  # pid dead — safe to reclaim
+        except (OSError, OverflowError):
+            # EPERM (alive, not ours) or pid out of C-long range — never delete
+            continue
+        try:
+            os.unlink(os.path.join(directory, name))
+        except OSError:
+            pass
+
+
 def _build_rewrite_line(entry_type, name_or_r, info_or_none):
     """Build one JSONL line for rewrite_graph."""
     if entry_type == "entity":
@@ -772,6 +803,9 @@ def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
             except OSError:
                 pass
             raise
+        # why: replace consumed our temp; reclaim only .new.* temps whose
+        # owning pid is dead (a live writer's temp must survive).
+        _sweep_orphan_temps(graph_path)
         # Rewrite touches entity/relation data but never tfidf_index.json;
         # keep the on-disk index cache hot to avoid a costly reload.
         clear_entity_cache()

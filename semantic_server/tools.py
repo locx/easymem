@@ -30,7 +30,12 @@ from .graph import (
     load_graph_relations,
     rewrite_graph_locked,
 )
-from .text import normalize_name, normalize_type, scrub_secrets
+from .text import (
+    normalize_name,
+    normalize_type,
+    scrub_identity,
+    scrub_secrets,
+)
 
 _DECISION_PREFIX = "decision: "
 
@@ -100,7 +105,7 @@ def create_entities(entities_input, memory_dir):
         name = ent.get("name", "")
         if not isinstance(name, str):
             continue
-        name = name.strip()
+        name = scrub_identity(name.strip())
         if not name:
             continue
         etype = normalize_type(ent.get("entityType", ""))
@@ -197,6 +202,8 @@ def create_relations(relations_input, memory_dir):
                 or not isinstance(fr, str) \
                 or not isinstance(to, str):
             continue
+        fr = scrub_identity(fr)
+        to = scrub_identity(to)
         if fr == to:
             continue
         key = (fr, to, rt)
@@ -246,6 +253,9 @@ def add_observations(entity_name, observations, memory_dir,
     if not isinstance(entity_name, str) \
             or not entity_name:
         return {"error": "entity name required"}
+    # why: names are scrubbed at create time; scrub the lookup key too so a
+    # raw-secret name still resolves to its stored [REDACTED:<h>] entity.
+    entity_name = scrub_identity(entity_name)
     observations, err = _validate_list_arg(
         observations, MAX_OBS_PER_CALL, "observations"
     )
@@ -354,9 +364,11 @@ def delete_entities(entity_names, memory_dir):
     outcome = {}
 
     def _transform(entities, relations):
+        # why: names are scrubbed at create time; scrub the lookup keys too so
+        # a raw-secret name still resolves to its stored [REDACTED:<h>] entity.
         to_delete = {
-            n for n in entity_names
-            if isinstance(n, str) and n in entities
+            scrub_identity(n) for n in entity_names
+            if isinstance(n, str) and scrub_identity(n) in entities
         }
         if not to_delete:
             return None
@@ -449,12 +461,14 @@ def create_decision(args, memory_dir):
 
     obs, outcome, obs_warnings = _build_decision_obs(args)
 
-    entity_name = f"{_DECISION_PREFIX}{title}"
+    # why: scrub the title here so the dedup check and the name create_entities
+    # stores (which scrubs again) reference the same [REDACTED:<h>] string.
+    entity_name = scrub_identity(f"{_DECISION_PREFIX}{title}")
     # why: create_entities does not reject duplicate names — re-appending merges
     # observations at load time and silently overwrites the prior Outcome line.
     if entity_name in load_graph_entities(memory_dir):
         return {
-            "error": f"decision '{title}' already exists",
+            "error": f"decision '{scrub_identity(title)}' already exists",
             "existing": entity_name,
             "hint": "use update_decision_outcome",
         }
@@ -488,7 +502,7 @@ def create_decision(args, memory_dir):
 
     log_event(
         "DECISION",
-        f'"{title}" outcome={outcome}',
+        f'"{scrub_identity(title)}" outcome={outcome}',
     )
     resp = {
         "created": result.get("created", 0),
@@ -518,7 +532,9 @@ def _mint_failure_guideline(title, lesson, memory_dir):
         "observations": [f"[LESSON] {lesson}",
                          f"From failed decision: {clean}"],
     }], memory_dir)
-    return name if res.get("created") else None
+    # why: create_entities scrubs the name before storing; return the scrubbed
+    # form so the response matches the graph and never leaks the raw title.
+    return scrub_identity(name) if res.get("created") else None
 
 
 def update_decision_outcome(args, memory_dir):
@@ -569,16 +585,20 @@ def update_decision_outcome(args, memory_dir):
             if "not found" in err:
                 continue
             return {
-                "error": f"Write failed for '{entity_name}': " + err,
+                "error": f"Write failed for "
+                         f"'{scrub_identity(entity_name)}': " + err,
             }
+        # why: echo/log the scrubbed name that was actually stored, so a
+        # secret-shaped title is never reflected back or written to a log.
+        stored_name = scrub_identity(entity_name)
         log_event(
             "OUTCOME",
-            f'"{title}" -> {outcome}'
-            + (f" lesson: {lesson[:80]}"
+            f'"{stored_name}" -> {outcome}'
+            + (f" lesson: {scrub_secrets(lesson)[:80]}"
                if lesson else ""),
         )
         resp = {
-            "updated": entity_name,
+            "updated": stored_name,
             "outcome": outcome,
             "observations_added": result.get(
                 "added", 0
@@ -591,7 +611,7 @@ def update_decision_outcome(args, memory_dir):
         return resp
 
     return {
-        "error": f"Decision '{title}' not found",
+        "error": f"Decision '{scrub_identity(title)}' not found",
     }
 
 
@@ -864,6 +884,9 @@ def remove_observations(entity_name, observations, memory_dir):
         return {"error": "entity name required"}
     if not isinstance(observations, list):
         return {"error": "observations must be a list"}
+    # why: names are scrubbed at create time; scrub the lookup key too so a
+    # raw-secret name still resolves to its stored [REDACTED:<h>] entity.
+    entity_name = scrub_identity(entity_name)
 
     outcome = {}
 
@@ -946,6 +969,10 @@ def rename_entity(old_name, new_name, memory_dir):
     """
     if not old_name or not new_name:
         return {"error": "old_name and new_name required"}
+    # why: stored names are scrubbed; scrub the target so a secret-shaped new
+    # name never lands raw, and the lookup key so a raw old name still resolves.
+    old_name = scrub_identity(old_name)
+    new_name = scrub_identity(new_name)
     if old_name == new_name:
         return {"error": "names are identical"}
 
