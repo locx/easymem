@@ -92,7 +92,7 @@ remove_path() {
 
 # --- Project cleanup ---
 # Steps: 1) .easymem/ dir  2) .gitignore entries  3) CLAUDE.md plugin section
-#        4) .claude/settings.json easymem permission  5) temp markers
+#        4) .claude/settings.json easymem permission  5) nudge state + markers
 cleanup_project() {
     local dir="$1"
     echo ""
@@ -155,7 +155,9 @@ PYEOF
 
     # 3. Remove EasyMem Plugin section from CLAUDE.md
     if [ -f "${dir}/CLAUDE.md" ]; then
-        if grep -qE '## EasyMem' "${dir}/CLAUDE.md" 2>/dev/null; then
+        # why: match the strip script's exact heading so we never report
+        # "[removed]" when nothing would actually be stripped.
+        if grep -qE '^## EasyMem \(Easy Memory\)' "${dir}/CLAUDE.md" 2>/dev/null; then
             if $DRY_RUN; then
                 echo "  [dry-run] Would remove EasyMem section from CLAUDE.md"
             elif confirm "Remove EasyMem section from CLAUDE.md?"; then
@@ -219,24 +221,38 @@ print('  \033[0;32m[removed]\033[0m easymem permission from .claude/settings.jso
 PYEOF
     fi
 
-    # 5. Clear temp nudge marker for this project
-    if ! $DRY_RUN; then
-        # Compute same hash as nudge-setup.sh
-        _proj_hash=""
-        if command -v md5 &>/dev/null; then
-            _proj_hash=$(md5 -q -s "$dir")
-        elif command -v md5sum &>/dev/null; then
-            _proj_hash=$(echo -n "$dir" | md5sum | cut -d' ' -f1)
+    # 5. Clear nudge state + temp marker for this project
+    # why: must hash exactly like nudge-setup.sh's _project_hash (python
+    # md5 of realpath) or stale nudge state survives cleanup.
+    _proj_hash=$(python3 - "$dir" 2>/dev/null <<'PY'
+import hashlib, os, sys
+print(hashlib.md5(os.path.realpath(sys.argv[1]).encode()).hexdigest())
+PY
+) || _proj_hash=""
+    if [ -n "$_proj_hash" ]; then
+        NUDGE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/easymem/nudge"
+        if [ -e "${NUDGE_DIR}/${_proj_hash}.count" ] \
+                || [ -e "${NUDGE_DIR}/${_proj_hash}.suppress" ]; then
+            if confirm "Remove nudge state for this project?"; then
+                remove_path "${NUDGE_DIR}/${_proj_hash}.count" \
+                    "nudge count file"
+                remove_path "${NUDGE_DIR}/${_proj_hash}.suppress" \
+                    "nudge suppress marker"
+            fi
         else
-            _proj_hash=$(echo -n "$dir" | cksum | cut -d' ' -f1)
+            echo "  [skip] nudge state — not found"
         fi
-        rm -f "/tmp/.claude-easymem-nudge-${_proj_hash}" 2>/dev/null || true
+        if ! $DRY_RUN; then
+            rm -f "/tmp/.claude-easymem-nudge-${_proj_hash}" \
+                2>/dev/null || true
+        fi
     fi
 }
 
 # --- Global cleanup ---
 # Steps: 1) ~/.claude/easymem/ (incl. venv+sidecar+manifest)
 #        2) hook scripts  3) settings.json hook wiring  4) temp markers
+#        5) XDG config dir (nudge state)
 cleanup_global() {
     echo ""
     printf "${RED}=== Global Cleanup ===${NC}\n"
@@ -284,6 +300,16 @@ cleanup_global() {
     elif confirm "Remove /tmp/.claude-easymem-* temp markers?"; then
         rm -f /tmp/.claude-easymem-* 2>/dev/null || true
         echo "  [removed] /tmp/.claude-easymem-* markers"
+    fi
+
+    # 5. Remove XDG config dir (nudge counts/suppress markers)
+    EM_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/easymem"
+    if [ -d "$EM_CFG" ]; then
+        if confirm "Delete ${EM_CFG}/ ?"; then
+            remove_path "$EM_CFG" "${EM_CFG}/"
+        fi
+    else
+        echo "  [skip] ${EM_CFG}/ — not found"
     fi
 }
 

@@ -67,27 +67,51 @@ def score_entity(entity, now_ts, recall_counts=None, cutoff_str=None, max_age_da
     if recall_counts:
         rc = recall_counts.get(entity.get("name", ""), 0)
         if rc > 0:
-            score *= (1.0 + math.log(rc))
+            # why: log1p so the first recall already boosts (log(1)=0
+            # made a single recall worthless against decay).
+            score *= (1.0 + math.log1p(rc))
 
     return score
+
+# why: bound the blast radius of one decay pass — a scoring bug or clock
+# skew must not be able to wipe the graph unrecoverably.
+_PRUNE_CAP_MIN = 100
+_PRUNE_CAP_FRACTION = 0.10
+
 
 def prune_entities(
     entities, relations, recall_counts=None,
     max_age_days=90, decay_threshold=0.1,
     episode_decay_days=14, episode_survival_recall=2,
+    min_prune_age_days=30,
 ):
-    """Remove low-score entities with zero inbound relations."""
+    """Remove low-score entities with zero inbound relations.
+
+    Non-episode entities younger than min_prune_age_days never prune;
+    one pass prunes at most max(_PRUNE_CAP_MIN, 10% of entities),
+    lowest scores first (excess candidates defer to later passes).
+    """
     has_inbound = {r.get("to", "") for r in relations}
     now_ts = time.time()
     cutoff_dt = (datetime.now(timezone.utc) - timedelta(days=max_age_days))
     cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    floor_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=min_prune_age_days)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    pruned_names = set()
-    kept = []
+    candidates = []
+    blank_dropped = 0
+    drop_idx = set()
+    warned_ts = False
     # why: loop-invariant; bind once instead of per episode iteration.
     EPISODE_DECAY_DAYS = episode_decay_days
     EPISODE_SURVIVAL_RECALL = episode_survival_recall
-    for e in entities:
+    for idx, e in enumerate(entities):
+        name = e.get("name", "")
+        if not name.strip():
+            blank_dropped += 1
+            drop_idx.add(idx)
+            continue
         # Episode decay: unrecalled episodes prune past episode_decay_days
         if e.get("entityType") == "episode":
             ts = e.get("_updated") or e.get("_created", "")
@@ -95,30 +119,48 @@ def prune_entities(
                 try:
                     ep_dt = parse_iso_date(ts)
                     age_days = (now_ts - ep_dt.timestamp()) / 86400
-                    rc = (recall_counts or {}).get(e.get("name", ""), 0)
+                    rc = (recall_counts or {}).get(name, 0)
                     if (age_days > EPISODE_DECAY_DAYS
                             and rc < EPISODE_SURVIVAL_RECALL):
-                        pruned_names.add(e.get("name", ""))
+                        candidates.append((0.0, idx, name))
                         continue
                 except Exception:
-                    pass
-        name = e.get("name", "")
-        if not name.strip():
-            continue
+                    if not warned_ts:
+                        sys.stderr.write(
+                            "warn: unparseable episode timestamp; "
+                            "decay skipped for it\n"
+                        )
+                        warned_ts = True
         if name in has_inbound:
-            kept.append(e)
+            continue
+        # why: hard recency floor — score-based decay must never delete
+        # young entities (a 1-obs entity used to score below threshold
+        # at day 10 despite a 90-day max age).
+        ts = e.get("_updated") or e.get("_created", "")
+        if ts and ts > floor_cutoff:
             continue
         score = score_entity(e, now_ts, recall_counts, cutoff_str, max_age_days)
         if score < decay_threshold:
-            pruned_names.add(name)
-        else:
-            kept.append(e)
+            candidates.append((score, idx, name))
+
+    cap = max(_PRUNE_CAP_MIN, int(len(entities) * _PRUNE_CAP_FRACTION))
+    if len(candidates) > cap:
+        candidates.sort(key=lambda c: c[0])
+        sys.stderr.write(
+            f"warn: prune capped at {cap} this pass; "
+            f"{len(candidates) - cap} candidates deferred\n"
+        )
+        candidates = candidates[:cap]
+
+    pruned_names = {name for _, _, name in candidates}
+    drop_idx.update(idx for _, idx, _ in candidates)
+    kept = [e for i, e in enumerate(entities) if i not in drop_idx]
 
     kept_rels = [
         r for r in relations
         if r.get("from") not in pruned_names and r.get("to") not in pruned_names
     ]
-    return kept, kept_rels, len(pruned_names)
+    return kept, kept_rels, len(pruned_names) + blank_dropped
 
 def _safe_obs_dedup(observations):
     """Deduplicate observations preserving insertion order."""

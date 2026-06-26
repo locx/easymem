@@ -131,20 +131,24 @@ easymem status                     # Verify install
 
 `install.sh` auto-detects the plugin and skips its own hook registration to prevent double-fire.
 
-### c. First-Session Auto-Init
+### c. First-Session Init (consented)
 
-When Claude Code starts in a project without `.easymem/`, the `SessionStart` hook auto-runs setup. It creates:
+When Claude Code starts in a project without `.easymem/`, the `SessionStart` hook prints a one-line nudge — it never modifies your files. To set the project up, run:
+
+```bash
+easymem init
+```
+
+That creates:
 
 - **`.easymem/`** — graph + config + indices (also added to your `.gitignore`).
 - **`~/.claude/easymem-bin/easymem`** — stable wrapper. `CLAUDE.md` docs and the Bash allow-list both reference this path so they don't drift across plugin updates.
-- **`.claude/settings.json`** — appends `Bash($HOME/.claude/easymem-bin/easymem *)` to the allow-list.
+- **`.claude/settings.json`** — appends read-only entries (`search`, `recall`, `status`, `doctor`, `diff`, `help`) to the Bash allow-list; writes still prompt.
 - **`CLAUDE.md`** — appends an EasyMem section so the agent knows the commands available to it. Creates the file if it doesn't exist.
-
-If auto-setup fails (e.g. missing `python3`), the hook prints the manual `setup-project.sh` command instead.
 
 ### d. Suppressing the Nudge
 
-If `.easymem/` is later missing on a session (you deleted it deliberately, or auto-setup failed), the hook nudges once per 24 hours. After three nudges it offers `easymem nudge suppress` — that writes a marker at `~/.config/easymem/nudge/<hash>.suppress` and silences the hook for that project. Delete the marker to re-enable.
+The setup nudge fires at most once per 24 hours. After three nudges it offers `easymem nudge suppress` — that writes a marker at `~/.config/easymem/nudge/<hash>.suppress` and silences the hook for that project. Delete the marker to re-enable.
 
 ---
 
@@ -159,6 +163,9 @@ Visible artifacts: `.easymem/graph.jsonl` (append-only entity + relation log) an
 ### b. Day-Two — Inspect, Update, Cleanup
 
 ```bash
+# Initialize a project (the SessionStart hook nudges, never auto-runs this)
+easymem init
+
 # Search and recall
 easymem search "JWT validation"
 easymem recall "JWT validation"           # search + 1-hop neighbours
@@ -181,8 +188,8 @@ easymem rebuild --rebuild-now             # force TF-IDF + vector rebuild
 #   Legacy install: git pull && ./install.sh && ./setup-project.sh /path/to/project
 
 # Sync — portable JSON bundle for cross-machine moves
-./export-easymem.sh /path/to/project bundle.json
-./import-easymem.sh bundle.json /path/to/target
+easymem export bundle.json                # or ./export-easymem.sh
+easymem import bundle.json                # or ./import-easymem.sh
 
 # Cleanup — prompts before destructive steps
 ./cleanup.sh project /path/to/project     # Remove .easymem/, settings entries, CLAUDE.md section
@@ -197,7 +204,7 @@ easymem rebuild --rebuild-now             # force TF-IDF + vector rebuild
 
 Runs on schedule (and on `easymem rebuild`); you don't invoke these — hooks do.
 
-- **🔄 Hebbian decay** — frequently recalled entities strengthen; untouched ones fade and prune past `MAX_AGE_DAYS`.
+- **🔄 Hebbian decay** — frequently recalled entities strengthen; untouched ones fade and prune past `MAX_AGE_DAYS`. Safety rails: nothing (except short-lived episodes) prunes before a 30-day floor, one pass prunes at most max(100, 10%) of entities, and a pre-prune `graph.jsonl.bak` survives the pass.
 - **⚖️ Contradiction auto-resolve** — two same-source episodes that conflict: later supersedes, earlier marked `superseded:` (not deleted).
 - **🧩 Workflow extraction** — episodes sharing a neighbour set ≥3 times mint a `workflow:` entity (e.g. "auth refactor: login → token → refresh").
 - **🌿 Branch-aware scoring** — relevance rebalances as you switch git branches. `main` is always preserved.
@@ -214,6 +221,7 @@ Runs on schedule (and on `easymem rebuild`); you don't invoke these — hooks do
 | 🪟 **Session diversification**       | Caps hits per source — no single verbose conversation dominates.      |
 
 > LongMemEval-S p50 **116 ms**, p95 **157 ms** end-to-end including maintenance per query.
+> Reproduce: the harness is in [`bench/`](bench/) — datasets and exact commands in [`bench/README.md`](bench/README.md).
 
 ---
 
@@ -253,7 +261,7 @@ Non-easymem rows are each project's own published claim; verify against the sour
               ▼
    ┌──────────────────────────────────────────────────────────────────────────────┐
    │  .easymem/                                                                   │
-   │  graph.jsonl · tfidf_index · vectors.bin · slots.json · contradictions.json  │
+   │  graph.jsonl · tfidf_index · vec_index.npz · slots.json · contradictions.json│
    └──────────────────────────────────────────────────────────────────────────────┘
 
    Background: SessionStart / PostToolUse / Stop / PreCompact
@@ -262,7 +270,7 @@ Non-easymem rows are each project's own published claim; verify against the sour
 
 ### a. Storage
 
-Append-only JSONL at `.easymem/graph.jsonl`. Each line is an entity or a relation. `flock` + `fsync` + `os.replace` make every write atomic — either the old or new graph survives, never a partial.
+Append-only JSONL at `.easymem/graph.jsonl`. Each line is an entity or a relation. Rewrites are atomic (`flock` + temp file + `fsync` + `os.replace` — either the old or new graph survives). Appends are `flock` + `fsync` in place; a crash mid-append can leave a torn trailing line, which the loader skips on read.
 
 ### b. Code-Structure Indexer
 
@@ -299,6 +307,7 @@ Python uses `ast` for exact extraction. TypeScript / JavaScript handles re-expor
 | 🔍 `easymem: command not found`     | PATH not updated                         | `export PATH="$HOME/.claude/easymem-bin:$PATH"`                      |
 | 📭 Empty search results             | Index stale                              | `easymem rebuild --rebuild-now`                                      |
 | 📁 Search returns chat but not code | Code-stamp not refreshed                 | `easymem index-code .`                                               |
+| 🧮 `status` shows "lexical only"    | Vector deps missing for interpreter      | Re-run `install.sh` without `--no-vector`; use the `easymem` wrapper |
 | 🪝 Hooks firing twice               | Plugin AND `install.sh` both registered  | Re-run `install.sh` — it auto-skips hooks when the plugin is present |
 
 ### c. Platform & License

@@ -66,6 +66,7 @@ _DEFAULTS = {
     "MAX_AGE_DAYS": 90,
     "THROTTLE_HOURS": 24,
     "MIN_MERGE_NAME_LEN": 4,
+    "MIN_PRUNE_AGE_DAYS": 30,
 }
 
 _cfg = dict(_DEFAULTS)
@@ -109,6 +110,8 @@ def _load_config(easymem_dir):
          (int, float), 0.1, 720),
         ("min_merge_name_len", "MIN_MERGE_NAME_LEN",
          int, 1, 100),
+        ("min_prune_age_days", "MIN_PRUNE_AGE_DAYS",
+         int, 0, 3650),
     ):
         v = _valid(cfg, json_key, types, lo, hi)
         if v is not None:
@@ -416,16 +419,19 @@ def _compute_maintenance(entities, relations, project_dir, easymem_dir):
     branch = get_branch(cwd=project_dir)
     recall_counts = read_recall_counts(easymem_dir)
     entities = stamp_metadata(entities, branch)
+    # why: consolidate BEFORE prune so an entity split across append
+    # delta lines is scored as one merged record, not line-by-line.
+    entities, relations, merged = consolidate(
+        entities, relations,
+        min_merge_name_len=_cfg["MIN_MERGE_NAME_LEN"]
+    )
     entities, relations, pruned = prune_entities(
         entities, relations, recall_counts,
         max_age_days=_cfg["MAX_AGE_DAYS"],
         decay_threshold=_cfg["DECAY_THRESHOLD"],
         episode_decay_days=EPISODE_DECAY_DAYS,
         episode_survival_recall=EPISODE_SURVIVAL_RECALL,
-    )
-    entities, relations, merged = consolidate(
-        entities, relations,
-        min_merge_name_len=_cfg["MIN_MERGE_NAME_LEN"]
+        min_prune_age_days=_cfg["MIN_PRUNE_AGE_DAYS"],
     )
     entities, relations = _extract_workflows_inline(entities, relations)
     # why: _neighbors is a transient derivation from relations; persisting
@@ -604,7 +610,10 @@ def _finalize_maintenance(easymem_dir, entities, recall_counts, pruned, merged):
             touch_code_stamp(easymem_dir, project_dir)
         except Exception as exc:
             print(f"code scan skipped: {exc}", file=sys.stderr)
-    rebuild_index(easymem_dir)
+    # why: persist=False — run() already stamped and rewrote; a second
+    # rewrite here would overwrite .bak with the post-prune graph and
+    # erase the only pre-prune recovery point.
+    rebuild_index(easymem_dir, persist=False)
 
 
 def run(project_dir, force=False):
@@ -699,8 +708,12 @@ def run(project_dir, force=False):
         try:
             from semantic_server.vector import rebuild_if_stale
             from semantic_server.graph import load_graph_entities
-        except ImportError:
+        except ImportError as exc:
             rebuild_if_stale = None
+            # why: a silently-skipped rebuild leaves the vector index
+            # permanently stale; say so where maintenance.err captures it.
+            print(f"maintenance: vector rebuild skipped ({exc})",
+                  file=sys.stderr)
         if rebuild_if_stale is not None:
             graph_mtime = (
                 os.stat(graph_path).st_mtime
@@ -717,8 +730,12 @@ def run(project_dir, force=False):
             maint_lock_fd.close()
 
 
-def rebuild_index(easymem_dir):
-    """Rebuild TF-IDF index without throttle/prune/merge. Returns count."""
+def rebuild_index(easymem_dir, persist=True):
+    """Rebuild TF-IDF index without throttle/prune/merge. Returns count.
+
+    persist=False indexes the stamped snapshot without rewriting the
+    graph (no backup taken) — for callers that just rewrote it.
+    """
     graph_path = os.path.join(easymem_dir, "graph.jsonl")
     if not os.path.exists(graph_path):
         return 0
@@ -747,7 +764,7 @@ def rebuild_index(easymem_dir):
             entities = stamp_metadata(entities, branch)
             # Refuse the rewrite if backup fails or the result would be
             # an empty graph (guards against partial-corruption truncation).
-            if _backup_graph(graph_path):
+            if persist and _backup_graph(graph_path):
                 try:
                     write_jsonl(
                         graph_path,
@@ -816,16 +833,19 @@ if __name__ == "__main__":
         if os.path.exists(gp):
             ents, rels, _ = partition_graph(gp)
             rc = read_recall_counts(mem_dir)
+            # why: mirror run()'s consolidate-then-prune order so the
+            # dry-run counts match what a real pass would do.
+            c_ents, c_rels, merged = consolidate(
+                list(ents), list(rels),
+                min_merge_name_len=_cfg["MIN_MERGE_NAME_LEN"]
+            )
             _, _, pruned = prune_entities(
-                list(ents), list(rels), rc,
+                c_ents, c_rels, rc,
                 max_age_days=_cfg["MAX_AGE_DAYS"],
                 decay_threshold=_cfg["DECAY_THRESHOLD"],
                 episode_decay_days=EPISODE_DECAY_DAYS,
                 episode_survival_recall=EPISODE_SURVIVAL_RECALL,
-            )
-            _, _, merged = consolidate(
-                list(ents), list(rels),
-                min_merge_name_len=_cfg["MIN_MERGE_NAME_LEN"]
+                min_prune_age_days=_cfg["MIN_PRUNE_AGE_DAYS"],
             )
             print(
                 f"Dry-run: would prune {pruned}, "

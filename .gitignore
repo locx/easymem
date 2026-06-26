@@ -28,8 +28,8 @@ env/
 # Memory
 .easymem/
 
-# Local-only (depend on bench/)
-bench
+# Local-only
 docs
-tests/test_bench_smoke.py
-tests/test_locomo_smoke.py
+
+# Benchmark datasets (harness is tracked; data fetched per bench/README.md)
+bench/data/

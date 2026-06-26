@@ -1,14 +1,14 @@
 #!/bin/bash
-# SessionStart hook: auto-init project on first encounter; nudge thereafter.
-# Opt out with `easymem nudge suppress`.
+# SessionStart hook: nudge un-initialized projects toward `easymem init`.
+# Never mutates project files. Opt out with `easymem nudge suppress`.
 
 EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
 
 # --- Guards ---
 [ -f "$EM_ROOT/maintenance.py" ] || exit 0
 [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
-# why: don't exit on .easymem present — auto-init and nudge branches need to
-# distinguish "first time" from "already set up" rather than skip together.
+# why: exit for set-up projects happens later, after suppress/throttle
+# state exists for the CLI to manage.
 HAS_EASYMEM=0
 [ -d "${CLAUDE_PROJECT_DIR}/.easymem" ] && HAS_EASYMEM=1
 
@@ -64,20 +64,7 @@ _locate_setup() {
 }
 SETUP_CMD=$(_locate_setup)
 
-# --- First encounter: auto-init via setup-project.sh ---
-# why: count file absent == first time; subsequent calls fall through to nudge.
-if [ "$HAS_EASYMEM" = "0" ] && [ ! -f "$COUNT_FILE" ] \
-        && [ -n "$SETUP_CMD" ] && [ -f "$SETUP_CMD" ]; then
-    echo "EasyMem: first session in this project — initializing .easymem/ ..."
-    if bash "$SETUP_CMD" "$CLAUDE_PROJECT_DIR"; then
-        echo 1 > "$COUNT_FILE"
-        exit 0
-    fi
-    echo ""
-    echo "(EasyMem auto-setup failed — manual instructions below.)"
-fi
-
-# why: already set up — stay quiet without dropping the rising-suppress branch.
+# why: already set up — stay quiet.
 [ "$HAS_EASYMEM" = "1" ] && exit 0
 
 # --- Nudge with rising suppress hint ---
@@ -87,6 +74,8 @@ echo "$COUNT" > "$COUNT_FILE"
 cat <<NUDGE
 This project does not have EasyMem set up.
 To enable persistent knowledge graph memory, run:
+  easymem init
+or, if the easymem CLI is not on PATH:
   '$SETUP_CMD' '$CLAUDE_PROJECT_DIR'
 
 This adds a .easymem/ directory (gitignored) with a CLI bridge

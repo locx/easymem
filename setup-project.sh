@@ -57,6 +57,7 @@ if [ ! -f "${CONFIG_FILE}" ]; then
   "_comment": "Optional overrides — delete keys to use defaults",
   "decay_threshold": 0.1,
   "max_age_days": 90,
+  "min_prune_age_days": 30,
   "throttle_hours": 24,
   "min_merge_name_len": 4
 }
@@ -150,16 +151,20 @@ else
 fi
 
 # ---- 7. Add Bash permission for easymem commands in .claude/settings.json ----
+# why: read-only subcommands only — a blanket `easymem *` would
+# auto-approve graph writes and deletes without a prompt.
 PROJ_SETTINGS_DIR="${PROJECT_DIR}/.claude"
 PROJ_SETTINGS="${PROJ_SETTINGS_DIR}/settings.json"
-EM_PERM="Bash(\$HOME/.claude/easymem-bin/easymem *)"
 
 mkdir -p "${PROJ_SETTINGS_DIR}"
-python3 - "${PROJ_SETTINGS}" "${EM_PERM}" << 'PYEOF'
+python3 - "${PROJ_SETTINGS}" << 'PYEOF'
 import json, os, sys
 
 settings_path = sys.argv[1]
-perm = sys.argv[2]
+base = 'Bash($HOME/.claude/easymem-bin/easymem'
+new_perms = [f'{base} {sub} *)' for sub in
+             ('search', 'recall', 'status', 'doctor', 'diff', 'help')]
+legacy = f'{base} *)'
 
 try:
     with open(settings_path, encoding='utf-8') as f:
@@ -170,11 +175,18 @@ except (OSError, json.JSONDecodeError, ValueError):
 perms = cfg.setdefault('permissions', {})
 allow = perms.setdefault('allow', [])
 
-if perm in allow:
-    print(f'  [skip] easymem Bash permission already in {settings_path}')
-    sys.exit(0)
+changed = False
+if legacy in allow:
+    allow.remove(legacy)
+    changed = True
+for perm in new_perms:
+    if perm not in allow:
+        allow.append(perm)
+        changed = True
 
-allow.append(perm)
+if not changed:
+    print(f'  [skip] easymem Bash permissions already in {settings_path}')
+    sys.exit(0)
 
 tmp = settings_path + '.tmp'
 with open(tmp, 'w', encoding='utf-8') as f:
@@ -183,7 +195,7 @@ with open(tmp, 'w', encoding='utf-8') as f:
     f.flush()
     os.fsync(f.fileno())
 os.replace(tmp, settings_path)
-print(f'  [ok] Added easymem Bash permission to {settings_path}')
+print(f'  [ok] Added easymem read-only Bash permissions to {settings_path}')
 PYEOF
 
 # ---- 8. Add/update EasyMem plugin instructions in CLAUDE.md ----

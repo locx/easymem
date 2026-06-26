@@ -43,10 +43,45 @@ if [ -f "$GRAPH" ]; then
 fi
 
 python3 - "$BUNDLE" "$GRAPH" << 'PYEOF'
-import json, os, sys, time
+import json, os, re, sys, time
 
 bundle_path = sys.argv[1]
 graph_path = sys.argv[2]
+
+# why: imported bundles are untrusted — scrub observations with the same
+# patterns capture_tool_context.py applies before anything hits the graph.
+_SECRET_RE = re.compile(
+    r"AKIA[0-9A-Z]{16}"
+    r"|gh[pousr]_[0-9A-Za-z]{20,}"
+    r"|sk-[0-9A-Za-z_\-]{20,}"
+    r"|xox[abpros]-[0-9A-Za-z\-]{10,}"
+    r"|Bearer\s+[A-Za-z0-9._~+/=\-]{20,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|--(?:password|passwd|token|api-key|secret)(?:=|[ \t]+)\S+"
+    r"|\b[A-Z_]*(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|ACCESS_KEY)"
+    r"[A-Z0-9_]*=\S+"
+)
+_URL_CRED_RE = re.compile(
+    r"(\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)[^/\s@]+(?=@)"
+)
+# why: mirror semantic_server.config.MAX_OBS_LENGTH and maintenance's
+# durable per-entity cap so imports can't exceed normal-path bounds.
+MAX_OBS_LEN = 5000
+MAX_OBS_PER_ENTITY = 200
+
+
+def _sanitize_obs(obs_list):
+    """Scrub secrets and bound size; truncate rather than reject."""
+    out = []
+    for o in obs_list[:MAX_OBS_PER_ENTITY]:
+        if isinstance(o, str):
+            # why: scrub before truncating so a secret straddling the
+            # cut can't survive as an unmatched partial.
+            o = _SECRET_RE.sub('[REDACTED]', o)
+            o = _URL_CRED_RE.sub(r'\g<1>[REDACTED]', o)
+            o = o[:MAX_OBS_LEN]
+        out.append(o)
+    return out
 
 # Load bundle
 with open(bundle_path, encoding='utf-8') as f:
@@ -137,6 +172,9 @@ for entry in import_entries:
         if not _validate_entity(entry):
             skipped_invalid += 1
             continue
+        entry['observations'] = _sanitize_obs(
+            entry.get('observations', [])
+        )
         key = (entry.get('name', ''),
                entry.get('entityType', ''))
         if key in existing_entities:
@@ -163,6 +201,12 @@ for entry in import_entries:
                         'observations', []
                     ).append(obs)
                     old_obs_str.add(k)
+            # why: keep the tail like maintenance's durable cap does.
+            merged_obs = existing[idx].get('observations', [])
+            if len(merged_obs) > MAX_OBS_PER_ENTITY:
+                existing[idx]['observations'] = (
+                    merged_obs[-MAX_OBS_PER_ENTITY:]
+                )
             merged_e += 1
         else:
             existing_entities[key] = len(existing)

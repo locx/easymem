@@ -28,7 +28,7 @@ from .graph import (
     invalidate_relation_cache_only,
     load_graph_entities,
     load_graph_relations,
-    rewrite_graph,
+    rewrite_graph_locked,
 )
 from .text import normalize_name, normalize_type
 
@@ -330,11 +330,12 @@ def add_observations(entity_name, observations, memory_dir,
     return {"added": total}
 
 
-def delete_entities(entity_names, memory_dir,
-                    _retry=False):
+def delete_entities(entity_names, memory_dir):
     """Delete entities and cascade-remove relations.
 
-    Mtime guard detects concurrent writes — retries once.
+    Loads, transforms, and rewrites under one graph lock so a
+    concurrent append can't be lost, and from the full on-disk view
+    so other entities keep all their observations.
     """
     entity_names, err = _validate_list_arg(
         entity_names, MAX_ENTITIES_PER_CALL, "entity_names"
@@ -342,73 +343,52 @@ def delete_entities(entity_names, memory_dir,
     if err:
         return err
 
-    graph_path = os.path.join(memory_dir, "graph.jsonl")
-    try:
-        pre_mtime = os.path.getmtime(graph_path)
-    except OSError:
-        pre_mtime = 0.0
+    outcome = {}
 
-    entities = load_graph_entities(memory_dir)
-    to_delete = {
-        n for n in entity_names
-        if isinstance(n, str) and n in entities
-    }
-    if not to_delete:
-        return {
-            "deleted": 0,
-            "message": "No matching entities found",
+    def _transform(entities, relations):
+        to_delete = {
+            n for n in entity_names
+            if isinstance(n, str) and n in entities
         }
-
-    remaining = {
-        k: v for k, v in entities.items()
-        if k not in to_delete
-    }
-
-    rels = load_graph_relations(memory_dir)
-    kept_rels = [
-        r for r in rels
-        if r.get("from") not in to_delete
-        and r.get("to") not in to_delete
-    ]
-
-    try:
-        post_mtime = os.path.getmtime(graph_path)
-    except OSError:
-        post_mtime = 0.0
-    if post_mtime != pre_mtime:
-        if not _retry:
-            invalidate_caches()
-            return delete_entities(
-                entity_names, memory_dir, _retry=True,
-            )
-        log_event(
-            "RACE",
-            f"concurrent write on delete: {list(to_delete)[:5]}",
-        )
-        return {
-            "error": "concurrent write",
-            "entity": list(to_delete),
+        if not to_delete:
+            return None
+        remaining = {
+            k: v for k, v in entities.items()
+            if k not in to_delete
         }
+        kept_rels = [
+            r for r in relations
+            if r.get("from") not in to_delete
+            and r.get("to") not in to_delete
+        ]
+        outcome["deleted"] = len(to_delete)
+        outcome["names"] = list(to_delete)[:5]
+        outcome["relations_removed"] = len(relations) - len(kept_rels)
+        return remaining, kept_rels
 
     try:
-        rewrite_graph(memory_dir, remaining, kept_rels)
+        rewrite_graph_locked(memory_dir, _transform)
     except OSError:
         return {
             "error": "Write failed (lock timeout)",
             "deleted": 0,
         }
 
-    n_del = len(to_delete)
-    n_rels = len(rels) - len(kept_rels)
+    if not outcome:
+        return {
+            "deleted": 0,
+            "message": "No matching entities found",
+        }
+    n_del = outcome["deleted"]
     session_stats["entities_deleted"] += n_del
     log_event(
         "DELETE",
-        f"{n_del} entities: {list(to_delete)[:5]}"
-        f", {n_rels} relations cascaded",
+        f"{n_del} entities: {outcome['names']}"
+        f", {outcome['relations_removed']} relations cascaded",
     )
     return {
         "deleted": n_del,
-        "relations_removed": n_rels,
+        "relations_removed": outcome["relations_removed"],
     }
 
 
@@ -787,60 +767,51 @@ def list_decisions(memory_dir, stale_days=None, limit=50):
     return resp
 
 
-def remove_observations(entity_name, observations,
-                        memory_dir, _retry=False):
-    """Remove specific observations from an entity."""
+def remove_observations(entity_name, observations, memory_dir):
+    """Remove specific observations from an entity.
+
+    Runs load+rewrite under one graph lock from the full on-disk
+    view — see delete_entities.
+    """
     if not isinstance(entity_name, str) \
             or not entity_name:
         return {"error": "entity name required"}
     if not isinstance(observations, list):
         return {"error": "observations must be a list"}
 
-    graph_path = os.path.join(memory_dir, "graph.jsonl")
+    outcome = {}
+
+    def _transform(entities, relations):
+        if entity_name not in entities:
+            outcome["error"] = f"Entity '{entity_name}' not found"
+            return None
+        info = entities[entity_name]
+        cur_obs = info.get("observations", [])
+        to_remove = {_obs_dedup_key(o) for o in observations}
+        kept = [o for o in cur_obs
+                if _obs_dedup_key(o) not in to_remove]
+        removed = len(cur_obs) - len(kept)
+        outcome["removed"] = removed
+        if removed == 0:
+            return None
+        updated = dict(entities)
+        updated[entity_name] = {
+            **info,
+            "observations": kept,
+            "_updated": now_iso(),
+        }
+        return updated, relations
+
     try:
-        pre_mtime = os.path.getmtime(graph_path)
+        rewrite_graph_locked(memory_dir, _transform)
     except OSError:
-        pre_mtime = 0.0
-
-    entities = load_graph_entities(memory_dir)
-    if entity_name not in entities:
-        return {"error": f"Entity '{entity_name}' not found"}
-
-    info = entities[entity_name]
-    cur_obs = info.get("observations", [])
-    to_remove = {_obs_dedup_key(o) for o in observations}
-    kept = [o for o in cur_obs
-            if _obs_dedup_key(o) not in to_remove]
-    removed = len(cur_obs) - len(kept)
+        return {"error": "Write failed (lock timeout)"}
+    if "error" in outcome:
+        return {"error": outcome["error"]}
+    removed = outcome.get("removed", 0)
     if removed == 0:
         return {"removed": 0,
                 "message": "No matching observations"}
-
-    updated = dict(entities)
-    updated[entity_name] = {
-        **info,
-        "observations": kept,
-        "_updated": now_iso(),
-    }
-    rels = load_graph_relations(memory_dir)
-
-    try:
-        post_mtime = os.path.getmtime(graph_path)
-    except OSError:
-        post_mtime = 0.0
-    if post_mtime != pre_mtime:
-        if not _retry:
-            invalidate_caches()
-            return remove_observations(
-                entity_name, observations, memory_dir, _retry=True,
-            )
-        log_event("RACE", f'concurrent write on entity="{entity_name}"')
-        return {"error": "concurrent write", "entity": entity_name}
-
-    try:
-        rewrite_graph(memory_dir, updated, rels)
-    except OSError:
-        return {"error": "Write failed (lock timeout)"}
     log_event("REMOVE_OBS",
               f'entity="{entity_name}" removed={removed}')
     return {"removed": removed}
@@ -879,70 +850,59 @@ def _rewrite_relations_for_rename(rels, old_name, new_name):
     return fixed_rels, relations_updated, dropped_self_loops, dropped_dups
 
 
-def rename_entity(old_name, new_name, memory_dir, _retry=False):
+def rename_entity(old_name, new_name, memory_dir):
     """Rename an entity, updating all relation references.
 
     Drops self-loops and dedups duplicate (from, to, type) edges
     that can arise when both old_name and new_name appear in the
-    same relation.
+    same relation. Runs load+rewrite under one graph lock from the
+    full on-disk view — see delete_entities.
     """
     if not old_name or not new_name:
         return {"error": "old_name and new_name required"}
     if old_name == new_name:
         return {"error": "names are identical"}
 
-    graph_path = os.path.join(memory_dir, "graph.jsonl")
-    try:
-        pre_mtime = os.path.getmtime(graph_path)
-    except OSError:
-        pre_mtime = 0.0
+    outcome = {}
 
-    entities = load_graph_entities(memory_dir)
-    if old_name not in entities:
-        return {"error": f"Entity '{old_name}' not found"}
-    if new_name in entities:
-        return {"error": f"Entity '{new_name}' already exists"}
-
-    updated = {}
-    for name, info in entities.items():
-        if name == old_name:
-            updated[new_name] = {
-                **info, "_updated": now_iso(),
-            }
-        else:
-            updated[name] = info
-
-    rels = load_graph_relations(memory_dir)
-    fixed_rels, relations_updated, dropped_self_loops, dropped_dups = (
-        _rewrite_relations_for_rename(rels, old_name, new_name)
-    )
-
-    try:
-        post_mtime = os.path.getmtime(graph_path)
-    except OSError:
-        post_mtime = 0.0
-    if post_mtime != pre_mtime:
-        if not _retry:
-            invalidate_caches()
-            return rename_entity(
-                old_name, new_name, memory_dir, _retry=True,
-            )
-        log_event("RACE", f'concurrent write on entity="{old_name}"')
-        return {"error": "concurrent write", "entity": old_name}
+    def _transform(entities, relations):
+        if old_name not in entities:
+            outcome["error"] = f"Entity '{old_name}' not found"
+            return None
+        if new_name in entities:
+            outcome["error"] = f"Entity '{new_name}' already exists"
+            return None
+        updated = {}
+        for name, info in entities.items():
+            if name == old_name:
+                updated[new_name] = {
+                    **info, "_updated": now_iso(),
+                }
+            else:
+                updated[name] = info
+        fixed_rels, relations_updated, dropped_self_loops, dropped_dups = (
+            _rewrite_relations_for_rename(relations, old_name, new_name)
+        )
+        outcome["relations_updated"] = relations_updated
+        outcome["self_loops"] = dropped_self_loops
+        outcome["dups"] = dropped_dups
+        return updated, fixed_rels
 
     try:
-        rewrite_graph(memory_dir, updated, fixed_rels)
+        rewrite_graph_locked(memory_dir, _transform)
     except OSError:
         return {"error": "Write failed (lock timeout)"}
+    if "error" in outcome:
+        return {"error": outcome["error"]}
     log_event("RENAME",
               f'"{old_name}" -> "{new_name}"')
     resp = {
         "renamed": old_name,
         "to": new_name,
-        "relations_updated": relations_updated,
+        "relations_updated": outcome.get("relations_updated", 0),
     }
-    if dropped_self_loops:
-        resp["self_loops_removed"] = dropped_self_loops
-    if dropped_dups:
-        resp["duplicate_relations_merged"] = dropped_dups
+    if outcome.get("self_loops"):
+        resp["self_loops_removed"] = outcome["self_loops"]
+    if outcome.get("dups"):
+        resp["duplicate_relations_merged"] = outcome["dups"]
     return resp

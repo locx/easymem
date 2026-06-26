@@ -1,12 +1,8 @@
-"""Minimal MCP server for semantic memory search.
+"""Semantic memory engine: graph store, hybrid search, maintenance.
 
-Pure Python — zero external dependencies.
-Uses TF-IDF cosine similarity over the knowledge graph.
-Communicates via JSON-RPC 2.0 over stdio (MCP stdio transport).
-
-Usage:
-    EASYMEM_DIR=/path/to/.easymem python3 -m semantic_server
+Consumed by the easymem CLI and hooks. The legacy MCP stdio server
+(`python3 -m semantic_server`) is deprecated; nothing in the shipped
+wiring uses it.
 """
-from .server import main
 
-__all__ = ["main"]
+__all__ = []

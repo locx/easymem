@@ -53,6 +53,8 @@ def _usage(stream=sys.stderr, exit_code=1):
         "Usage: easymem [--easymem-dir DIR] "
         "<command> [args]\n"
         "\nCommands:\n"
+        "  init                    "
+        "Set up EasyMem for this project (consented)\n"
         "  search <query>          "
         "Search knowledge graph\n"
         "  recall <query>          "
@@ -326,12 +328,17 @@ def _check_vector_layer(issues):
         )
         status["venv"] = "missing"
     else:
-        with open(venv_py_file) as f:
-            venv_py = f.read().strip()
-        if not os.path.exists(venv_py):
+        try:
+            with open(venv_py_file) as f:
+                venv_py = f.read().strip()
+        except OSError as exc:
+            issues.append(f".venv-python unreadable: {exc}")
+            status["venv"] = "unreadable"
+            venv_py = ""
+        if venv_py and not os.path.exists(venv_py):
             issues.append(f"venv python missing at {venv_py}")
             status["venv"] = "missing"
-        else:
+        elif venv_py:
             try:
                 rc = subprocess.run(
                     [venv_py, "-c", "import model2vec"],
@@ -465,6 +472,8 @@ def _run_doctor(memory_dir):
         _print_doctor_ansi(result)
     else:
         print(json.dumps(result, indent=2))
+    # why: scripts branch on $? — issues must not exit 0.
+    return 1 if issues else 0
 
 
 def _print_doctor_ansi(result):
@@ -676,6 +685,18 @@ def _unified_remove(a, memory_dir):
 def _unified_status(a, memory_dir):
     from semantic_server.tools import graph_stats, list_decisions
     stats = graph_stats(memory_dir)
+    # why: lexical-only fallback is silent at search time; status is
+    # where a user can see the vector layer isn't actually running.
+    try:
+        import model2vec  # noqa: F401
+        import numpy  # noqa: F401
+        stats["retrieval"] = "hybrid (tfidf + vector)"
+    except ImportError:
+        stats["retrieval"] = (
+            "lexical only — vector deps missing for "
+            f"{sys.executable} (run install.sh, then use the "
+            "easymem wrapper)"
+        )
     pending = list_decisions(
         memory_dir, stale_days=2
     ).get("decisions", [])
@@ -868,7 +889,7 @@ def _run_diff(memory_dir):
         last_ts = None
 
     if not last_ts:
-        em = os.path.expanduser("~/.claude/easymem/easymem")
+        em = os.path.expanduser("~/.claude/easymem-bin/easymem")
         print("No previous session recorded. "
               f"Run `{em} status` in a new session first.")
         return
@@ -906,8 +927,8 @@ def _run_diff(memory_dir):
                 except (json.JSONDecodeError, ValueError):
                     continue
     except OSError:
-        print("Cannot read graph.")
-        return
+        print("Cannot read graph.", file=sys.stderr)
+        return 1
 
     for name, info in entities.items():
         etype = info.get("entityType", "")
@@ -1105,6 +1126,19 @@ def main():
         _usage(sys.stdout, 0)
         return
 
+    # why: explicit, consented project setup — the SessionStart hook only
+    # nudges toward this command and never mutates files itself.
+    if tool_name == "init":
+        import subprocess
+        sh = os.path.join(_script_dir, "setup-project.sh")
+        if not os.access(sh, os.X_OK):
+            print(f"Error: {sh} not found or not executable",
+                  file=sys.stderr)
+            sys.exit(1)
+        project_dir = os.path.dirname(os.path.abspath(memory_dir)) \
+            or os.getcwd()
+        sys.exit(subprocess.run([sh, project_dir]).returncode)
+
     if tool_name in ("export", "import"):
         import subprocess
         project_dir = os.path.dirname(os.path.abspath(memory_dir)) \
@@ -1169,12 +1203,10 @@ def main():
         return
 
     if tool_name == "doctor":
-        _run_doctor(memory_dir)
-        return
+        sys.exit(_run_doctor(memory_dir))
 
     if tool_name == "diff":
-        _run_diff(memory_dir)
-        return
+        sys.exit(_run_diff(memory_dir))
 
     if tool_name == "aliases":
         result = _run_aliases(memory_dir, extra_args)
@@ -1187,8 +1219,7 @@ def main():
         return
 
     if tool_name == "index-code":
-        _cmd_index_code(extra_args, memory_dir)
-        return
+        sys.exit(_cmd_index_code(extra_args, memory_dir))
 
     # --- Commands that need semantic_server ---
     from semantic_server.graph import load_index
@@ -1238,6 +1269,10 @@ def main():
         _format_tty_output(tool_name, result, top_k=top_k)
     else:
         print(json.dumps(result, indent=2))
+    # why: error results must fail the process so hooks/scripts can
+    # branch on $? instead of parsing JSON.
+    if isinstance(result, dict) and result.get("error"):
+        sys.exit(1)
 
     # Mark dirty after write ops; rebuild deferred to next maintenance.
     if tool_name in ("write", "decide", "remove"):

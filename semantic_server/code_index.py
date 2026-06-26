@@ -318,8 +318,7 @@ def scan_project(root, excludes: frozenset[str] | set[str] | None = None):
 
 from datetime import datetime, timezone
 
-from .graph import GraphLock, rewrite_graph
-from .io_utils import partition_graph
+from .graph import GraphLock, load_graph_full, rewrite_graph
 
 
 _CODE_SOURCE_PREFIX = "code:scan:"
@@ -416,8 +415,7 @@ def index_project(memory_dir: str, project_root: str,
         new_rels.extend(_build_relations(sf, project_root, info))
         new_rels.extend(_build_defined_in_relations(sf, info))
 
-    graph_path = os.path.join(memory_dir, "graph.jsonl")
-    # why: lock across partition+rewrite so a concurrent server/maintenance
+    # why: lock across load+rewrite so a concurrent server/maintenance
     # append between the two operations can't be clobbered.
     with GraphLock(memory_dir) as _lock:
         if not _lock.acquired:
@@ -428,42 +426,38 @@ def index_project(memory_dir: str, project_root: str,
                 "symbols": 0,
                 "error": "graph lock timeout",
             }
-        raw_entities, raw_rels, raw_others = partition_graph(graph_path)
-
-        # why: raw partition (not load_graph_entities) preserves _source for
-        # session tagging; indexer owns every file:/function:/class: entity.
+        # why: full merged load (not raw lines) — last-line-wins over
+        # append deltas would silently drop earlier observations of every
+        # non-owned entity; the merged view preserves _source too.
+        merged_ents, merged_rels, others = load_graph_full(memory_dir)
         OWNED_PREFIXES = ("file:", "function:", "class:")
         kept: dict[str, dict] = {}
         removed = 0
         dropped_owned: set[str] = set()
-        for obj in raw_entities:
-            name = obj.get("name", "")
+        for name, info in merged_ents.items():
             if any(name.startswith(p) for p in OWNED_PREFIXES):
                 if name not in seen_names:
                     removed += 1
                     dropped_owned.add(name)
-                    continue
-                # will be replaced by new_entities below
+                # else: replaced by new_entities below
                 continue
-            kept[name] = {
-                k: v for k, v in obj.items() if k != "name" and k != "type"
-            }
+            kept[name] = info
         for ent in new_entities:
             kept[ent["name"]] = {k: v for k, v in ent.items() if k != "name"}
 
         # why: drop owned-type relations AND any inbound relation whose endpoint
         # references an entity we just dropped — otherwise dangling refs leak.
         kept_rels: list[dict] = []
-        for r in raw_rels:
+        for r in merged_rels:
             if r.get("relationType") in _OWNED_REL_TYPES:
                 continue
             if r.get("from") in dropped_owned or r.get("to") in dropped_owned:
                 continue
-            kept_rels.append({k: v for k, v in r.items() if k != "type"})
+            kept_rels.append(r)
         kept_rels.extend(new_rels)
 
-        rewrite_graph(memory_dir, kept, kept_rels, others=raw_others,
-                      _lock_held=True)
+        rewrite_graph(memory_dir, kept, kept_rels, others=others,
+                      _lock_held=True, _full_source=True)
     n_files = sum(1 for e in new_entities if e["name"].startswith("file:"))
     n_symbols = len(new_entities) - n_files
     return {

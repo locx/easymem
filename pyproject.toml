@@ -1,0 +1,32 @@
+[project]
+name = "easymem"
+version = "0.1.0"
+description = "Persistent memory for Claude Code agents — hybrid-retrieval knowledge graph"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "model2vec>=0.3",
+    "numpy>=1.24",
+    "orjson>=3.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+# Deployed by install.sh / the plugin, not pip; packaging config exists so
+# tooling (ruff, pytest, pip download of dev deps) has one source of truth.
+[tool.setuptools]
+packages = ["semantic_server"]
+py-modules = ["maintenance"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["bench", "docs", ".easymem"]
+
+[tool.ruff.lint]
+# Errors-only gate: syntax errors, undefined names, unused imports/vars.
+# Style rules stay off until the legacy core is brought lint-clean.
+select = ["E9", "F"]
+# F401 in __init__/probe imports is deliberate (availability checks).
+ignore = []

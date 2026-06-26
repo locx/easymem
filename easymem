@@ -53,4 +53,11 @@ PROJECT_ROOT="$(find_root)"
 export EASYMEM_DIR="${EASYMEM_DIR:-${PROJECT_ROOT}/.easymem}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
-exec python3 "${SCRIPT_DIR}/easymem-cli.py" "$@"
+# why: optional deps (model2vec, numpy, orjson) live in the install venv;
+# plain python3 silently degrades search to lexical-only.
+EM_ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/easymem}"
+EASYMEM_PY="${EASYMEM_PYTHON:-$(cat "${SCRIPT_DIR}/.venv-python" 2>/dev/null \
+    || cat "${EM_ROOT}/.venv-python" 2>/dev/null || echo python3)}"
+[ -x "$EASYMEM_PY" ] || EASYMEM_PY=python3
+
+exec "$EASYMEM_PY" "${SCRIPT_DIR}/easymem-cli.py" "$@"

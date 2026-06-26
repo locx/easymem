@@ -35,6 +35,7 @@ from .cache import (
     estimate_size,
     maybe_evict_caches,
 )
+from .io_utils import iter_jsonl
 from .text import normalize_type
 
 
@@ -45,10 +46,11 @@ def _obs_dedup_key(obs):
     return ("d", json.dumps(obs, sort_keys=True))
 
 
-def _merge_obs(prev_obs, new_obs, seen=None):
+def _merge_obs(prev_obs, new_obs, seen=None, cap=MAX_CACHED_OBS):
     """Merge new_obs into prev_obs with dedup + truncate.
 
     Returns the updated seen-set; caller may cache for reuse.
+    cap=None disables truncation (full-fidelity loads for rewrites).
     """
     if seen is None:
         seen = {_obs_dedup_key(o) for o in prev_obs}
@@ -57,8 +59,8 @@ def _merge_obs(prev_obs, new_obs, seen=None):
         if k not in seen:
             prev_obs.append(o)
             seen.add(k)
-    if len(prev_obs) > MAX_CACHED_OBS:
-        prev_obs[:] = prev_obs[-MAX_CACHED_OBS:]
+    if cap is not None and len(prev_obs) > cap:
+        prev_obs[:] = prev_obs[-cap:]
         seen = {_obs_dedup_key(o) for o in prev_obs}
     return seen
 
@@ -468,6 +470,83 @@ def load_graph_relations(memory_dir):
     return relations
 
 
+# keys with dedicated merge handling in load_graph_full
+_ENTITY_MERGED_KEYS = (
+    "type", "name", "entityType", "observations", "_created", "_updated",
+)
+
+
+def load_graph_full(memory_dir):
+    """Merged, uncapped graph view: (entities, relations, others).
+
+    why: cached loads truncate observations (MAX_CACHED_OBS) for memory
+    bounds; a rewrite fed from that view would durably drop data. This
+    loader merges delta lines with no cap and preserves unknown fields.
+    """
+    graph_path = os.path.join(memory_dir, "graph.jsonl")
+    entities = {}
+    obs_keys = {}
+    relations = []
+    rel_seen = set()
+    others = []
+    for obj in iter_jsonl(graph_path):
+        t = obj.get("type")
+        if t == "entity":
+            name = obj.get("name", "")
+            if isinstance(name, str):
+                name = name.strip()
+            if not name:
+                continue
+            obs = obj.get("observations", [])
+            if not isinstance(obs, list):
+                obs = []
+            if name in entities:
+                prev = entities[name]
+                obs_keys[name] = _merge_obs(
+                    prev["observations"], obs,
+                    obs_keys.get(name), cap=None,
+                )
+                _merge_ts(
+                    prev,
+                    _norm_ts(obj.get("_created", "")),
+                    _norm_ts(obj.get("_updated", "")),
+                )
+                for k, v in obj.items():
+                    if k in _ENTITY_MERGED_KEYS:
+                        continue
+                    if v and not prev.get(k):
+                        prev[k] = v
+            else:
+                info = {
+                    k: v for k, v in obj.items()
+                    if k not in ("type", "name")
+                }
+                info["entityType"] = normalize_type(
+                    obj.get("entityType", ""))
+                info["observations"] = list(obs)
+                info["_created"] = _norm_ts(obj.get("_created", ""))
+                info["_updated"] = _norm_ts(obj.get("_updated", ""))
+                entities[name] = info
+                obs_keys[name] = {_obs_dedup_key(o) for o in obs}
+        elif t == "relation":
+            r_from = obj.get("from", "")
+            r_to = obj.get("to", "")
+            if not isinstance(r_from, str) or not isinstance(r_to, str):
+                continue
+            if not r_from or not r_to:
+                continue
+            rel = {k: v for k, v in obj.items() if k != "type"}
+            rel["relationType"] = normalize_type(
+                obj.get("relationType", ""))
+            key = (r_from, r_to, rel["relationType"])
+            if key not in rel_seen:
+                rel_seen.add(key)
+                relations.append(rel)
+        else:
+            others.append(obj)
+    return entities, relations, others
+
+
 # --- Write infrastructure ---
 
 
@@ -629,16 +708,18 @@ def _build_rewrite_line(entry_type, name_or_r, info_or_none):
 
 
 def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
-                  _lock_held=False):
+                  _lock_held=False, _full_source=False):
     """Atomic rewrite: temp file + fsync + os.replace.
 
     _lock_held: caller already holds GraphLock — skip the inner acquire to
     avoid fcntl.flock self-conflict across two fds in the same process.
 
     Refuses to write when entity_cache marks the loaded set as truncated;
-    persisting a truncated snapshot would permanently drop entities past cap.
+    persisting a truncated snapshot would permanently drop entities past
+    cap. _full_source=True asserts the input came from load_graph_full
+    (uncapped), so the cache's truncation state is irrelevant.
     """
-    if entity_cache.get("truncated"):
+    if entity_cache.get("truncated") and not _full_source:
         raise OSError("refusing to rewrite from a truncated entity cache")
     graph_path = os.path.join(memory_dir, "graph.jsonl")
     # why: per-writer temp so concurrent rewriters can't clobber a shared
@@ -708,3 +789,26 @@ def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
                 pass
             raise OSError("Graph lock timeout")
         _commit()
+
+
+def rewrite_graph_locked(memory_dir, transform):
+    """Load full graph, apply transform, rewrite — under one lock.
+
+    why: mtime guards taken outside the lock can still lose an append
+    that lands between check and replace; holding the lock across
+    load+transform+replace closes that window. transform(entities,
+    relations) returns (entities, relations) or None to abort unwritten.
+    """
+    with GraphLock(memory_dir) as lock:
+        if not lock.acquired:
+            raise OSError("Graph lock timeout")
+        entities, relations, others = load_graph_full(memory_dir)
+        result = transform(entities, relations)
+        if result is None:
+            return False
+        new_entities, new_relations = result
+        rewrite_graph(
+            memory_dir, new_entities, new_relations,
+            others=others, _lock_held=True, _full_source=True,
+        )
+    return True
