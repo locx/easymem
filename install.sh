@@ -2,17 +2,19 @@
 # EasyMem Infrastructure — Installer
 # Deploys runtime to ~/.claude/easymem/ and hooks to ~/.claude/hooks/.
 # Run from the easymem project directory.
-# Flags: --no-vector  --no-hooks  --minimal (both)
+# Flags: --no-vector  --no-hooks  --minimal (both)  --dev (project venv)
 set -euo pipefail
 
 VECTOR_INSTALL=1
 WIRE_HOOKS=1
+DEV_SETUP=0
 
 usage() {
     cat <<EOF
-Usage: install.sh [--no-vector] [--no-hooks] [--minimal]
+Usage: install.sh [--no-vector] [--no-hooks] [--minimal] [--dev]
 
 Default: installs everything (vector retrieval + hooks). Flags opt out.
+--dev also creates a project-local .venv with an editable install + dev extras.
 EOF
     exit 1
 }
@@ -22,6 +24,7 @@ while [ $# -gt 0 ]; do
         --no-vector) VECTOR_INSTALL=0 ;;
         --no-hooks)  WIRE_HOOKS=0 ;;
         --minimal)   VECTOR_INSTALL=0; WIRE_HOOKS=0 ;;
+        --dev)       DEV_SETUP=1 ;;
         --help|-h)   usage ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac
@@ -38,6 +41,7 @@ echo "=== EasyMem Infrastructure Installer ==="
 echo "  Source: ${SCRIPT_DIR}"
 echo "  Vector: $([ $VECTOR_INSTALL -eq 1 ] && echo ON || echo OFF)"
 echo "  Hooks:  $([ $WIRE_HOOKS -eq 1 ] && echo ON || echo OFF)"
+echo "  Dev:    $([ $DEV_SETUP -eq 1 ] && echo ON || echo OFF)"
 echo ""
 
 # --- Step 1: Preflight (python3 3.10+, git) ---
@@ -191,6 +195,29 @@ if [ $WIRE_HOOKS -eq 1 ]; then
 else
     echo "  [skip] hook wiring (--no-hooks)"
     echo "  Hooks deployed but not wired. Re-run without --no-hooks."
+fi
+
+# --- Dev setup: project-local venv with editable install + dev extras ---
+if [ $DEV_SETUP -eq 1 ]; then
+    echo "[dev] Setting up development environment..."
+    DEV_VENV="${SCRIPT_DIR}/.venv"
+    DEV_PY="${DEV_VENV}/bin/python3"
+
+    if [ ! -x "$DEV_PY" ]; then
+        python3 -m venv "$DEV_VENV"
+        echo "  [ok] venv at ${DEV_VENV}"
+    else
+        echo "  [skip] venv already exists"
+    fi
+
+    "$DEV_PY" -m pip install --quiet --upgrade pip
+    "$DEV_PY" -m pip install --quiet -e "${SCRIPT_DIR}[dev]" || {
+        echo "  ERROR: dev install failed; re-run install.sh --dev to retry" >&2
+        exit 1
+    }
+    echo "  [ok] editable install + dev extras (pytest, ruff)"
+    echo "  Activate: source ${DEV_VENV}/bin/activate"
+    echo ""
 fi
 
 cat <<EOF

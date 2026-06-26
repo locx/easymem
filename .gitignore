@@ -15,6 +15,9 @@ env/
 .ruff_cache/
 .claude/
 
+# Editable-install build metadata
+*.egg-info/
+
 # Environment files
 .env
 .env.*
