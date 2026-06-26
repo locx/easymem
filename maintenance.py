@@ -38,6 +38,7 @@ except ImportError:
 from semantic_server.code_index import (
     index_project, code_scan_is_stale, touch_code_stamp,
 )
+from semantic_server.config import now_iso as _now_iso
 from semantic_server.io_utils import partition_graph, write_jsonl, merge_pending
 from semantic_server.stem import stem_word as _stem
 from semantic_server.text import (
@@ -325,7 +326,7 @@ def log_pruned(easymem_dir, pruned_count, merged_count):
             os.replace(log_path, log_path + ".old")
     except OSError:
         pass
-    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ts = _now_iso()
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(
@@ -693,9 +694,8 @@ def run(project_dir, force=False):
 
         _promote_to_memory_md(project_dir, entities, recall_counts)
 
-        # Optional vector index rebuild. The ImportError guard is scoped
-        # tight so runtime errors from rebuild_if_stale propagate to the
-        # caller rather than silently corrupting state.
+        # Optional vector index rebuild. A rebuild failure degrades to TF-IDF
+        # — it only writes the derived vec index (atomic), never graph.jsonl.
         try:
             from semantic_server.vector import rebuild_if_stale
             from semantic_server.graph import load_graph_entities
@@ -711,7 +711,13 @@ def run(project_dir, force=False):
                 if os.path.exists(graph_path) else 0.0
             )
             ents_for_vec = load_graph_entities(easymem_dir)
-            rebuild_if_stale(easymem_dir, ents_for_vec, graph_mtime)
+            try:
+                rebuild_if_stale(easymem_dir, ents_for_vec, graph_mtime)
+            except Exception as exc:
+                # why: a vector rebuild failure (e.g. an absent local model)
+                # degrades to TF-IDF — it never fetches or corrupts the store.
+                print(f"maintenance: vector rebuild skipped ({exc})",
+                      file=sys.stderr)
     finally:
         if maint_lock_fd is not None:
             try:

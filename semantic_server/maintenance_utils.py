@@ -17,9 +17,13 @@ _GUARD_AGE_DAYS = 7
 _MAX_CONSOLIDATE_ENTITIES = 50_000
 
 try:
-    from .config import MAIN_BRANCHES as _MAIN_BRANCHES
+    from .config import (MAIN_BRANCHES as _MAIN_BRANCHES,
+                         now_iso as _now_iso)
 except ImportError:
     _MAIN_BRANCHES = frozenset({"main", "master", "trunk", "develop"})
+
+    def _now_iso():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 def read_recall_counts(memory_dir):
     """Load recall frequency counts from sidecar file."""
@@ -493,7 +497,7 @@ def write_contradictions_sidecar(memory_dir: str, findings: dict) -> None:
 
 def stamp_metadata(entities, branch):
     """Add _branch/_created to new entities."""
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now = _now_iso()
     for e in entities:
         if "_branch" not in e:
             e["_branch"] = branch

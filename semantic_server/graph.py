@@ -298,7 +298,9 @@ def load_index(memory_dir):
     try:
         with open(index_path, encoding="utf-8") as f:
             data = _fast_load(f)
-        size = estimate_size(data.get("vectors", {}))
+        # why: size by real on-disk bytes — estimate_size over-prices the
+        # index ~3.5x and evicts it from the cap on every load (thrash).
+        size = os.path.getsize(index_path)
         index_cache["data"] = data
         index_cache["mtime"] = mtime
         index_cache["path"] = index_path
@@ -489,6 +491,8 @@ def load_graph_full(memory_dir):
     relations = []
     rel_seen = set()
     others = []
+    # Load-time dedup (entity name, relation from/to/type) is the backstop that
+    # collapses merge_pending fsync-failure re-appends; never weaken it.
     for obj in iter_jsonl(graph_path):
         t = obj.get("type")
         if t == "entity":

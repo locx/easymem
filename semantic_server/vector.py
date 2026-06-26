@@ -26,9 +26,13 @@ def get_model():
     """Lazy-load model2vec StaticModel (one-shot per process)."""
     global _model
     if _model is None:
+        # Runtime must never reach the network: the model is fetched once at
+        # install time, so load only from the local cache, never re-download.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         from model2vec import StaticModel
         model_name = os.environ.get("EMBED_MODEL", EMBED_MODEL)
-        _model = StaticModel.from_pretrained(model_name)
+        _model = StaticModel.from_pretrained(model_name, force_download=False)
     return _model
 
 
@@ -109,6 +113,8 @@ def save_index(
     os.replace(tmp, path)
 
 
+# Deliberately outside cache._cache_total()'s 50MB budget: a single
+# mtime-keyed int8 matrix bounded by the entity cap (~26MB at 100k), never thrashed.
 _index_cache: dict = {"path": None, "mtime": None, "data": None}
 
 
