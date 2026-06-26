@@ -15,6 +15,7 @@ from .config import (
     RE_WORDS,
     RRF_K,
     get_current_branch,
+    iso_to_epoch as _iso_to_epoch,
     log_event,
     normalize_iso_ts as _normalize_iso_ts,
     session_stats,
@@ -31,7 +32,6 @@ from .text import (
     expand_synonyms as _expand_synonyms,
     extract_date_stems as _extract_date_stems,
     make_bigrams as _make_bigrams,
-    STOPWORDS as _STOPWORDS,
     filter_token as _filter_token,
     load_aliases,
     normalize_type,
@@ -39,6 +39,53 @@ from .text import (
 
 MIN_SIM_THRESHOLD = 0.001
 _HEBBIAN_ALPHA = 0.1
+
+def _env_float(key, default):
+    # why: a typo'd opt-in tuning value must not crash module import (and with
+    # it the whole CLI/MCP); fall back to the default instead.
+    try:
+        return float(_os.environ.get(key, default))
+    except ValueError:
+        return float(default)
+
+
+def _env_int(key, default):
+    try:
+        return int(_os.environ.get(key, default))
+    except ValueError:
+        return int(default)
+
+
+# why: recency boost is off by default (alpha 0) so the published retrieval
+# numbers are unchanged; the static benchmarks have no recency gradient to
+# validate it. Enable + tune via env for recency-sensitive real use.
+_FRESHNESS_ALPHA = _env_float("EASYMEM_FRESHNESS_ALPHA", "0.0")
+_FRESHNESS_HALFLIFE_DAYS = _env_float("EASYMEM_FRESHNESS_HALFLIFE_DAYS", "30")
+
+
+# why: short attribute-style queries ("favorite rice?") are the weak category —
+# vector sim is noisy across many similar sessions, so lean on lexical. Off by
+# default (boost 0) to keep the published numbers; enable + tune via env.
+_LEXICAL_BOOST = _env_float("EASYMEM_LEXICAL_BOOST", "0.0")
+_LEXICAL_BOOST_MAX_QTOKENS = _env_int("EASYMEM_LEXICAL_BOOST_MAX_QTOKENS", "4")
+
+
+def _lexical_weight(query):
+    if (_LEXICAL_BOOST > 0.0
+            and len(query.split()) <= _LEXICAL_BOOST_MAX_QTOKENS):
+        return 1.0 + _LEXICAL_BOOST
+    return 1.0
+
+
+def _freshness_mult(info, now):
+    if _FRESHNESS_ALPHA <= 0.0 or _FRESHNESS_HALFLIFE_DAYS <= 0.0:
+        return 1.0
+    t = _iso_to_epoch(info.get("_updated") or info.get("_created"))
+    if t is None:
+        return 1.0
+    age_days = max(0.0, (now - t) / 86400.0)
+    recency = 0.5 ** (age_days / _FRESHNESS_HALFLIFE_DAYS)
+    return 1.0 + _FRESHNESS_ALPHA * recency
 
 # Alias cache: reload when aliases.json mtime changes
 _alias_cache = {"map": None, "mtime": 0.0, "dir": ""}
@@ -345,9 +392,10 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
         vec_results = []
 
     scores: dict[str, float] = {}
+    lex_w = _lexical_weight(query)
     for rank, r in enumerate(tfidf_out.get("results", [])):
         scores[r["entity"]] = (
-            scores.get(r["entity"], 0.0) + 1.0 / (RRF_K + rank)
+            scores.get(r["entity"], 0.0) + lex_w * (1.0 / (RRF_K + rank))
         )
     for rank, (name, _sc) in enumerate(vec_results):
         scores[name] = scores.get(name, 0.0) + 1.0 / (RRF_K + rank)
@@ -358,6 +406,7 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
     # why: top-normalize so the smooth branch-penalty curve uses a per-row
     # signal; constant sim=0.5 made the penalty a flat constant.
     top_rrf = max(scores.values(), default=1.0) or 1.0
+    now = _time.time()
     fused = []
     for name, rrf in scores.items():
         if name not in current_entities:
@@ -366,7 +415,8 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
               or current_entities.get(name, {}).get("_branch", ""))
         boost = _branch_boost(eb, current_branch, rrf / top_rrf)
         rc = recall_counts.get(name, 0)
-        adj = rrf * boost * (1.0 + _HEBBIAN_ALPHA * math.log1p(rc))
+        fresh = _freshness_mult(current_entities.get(name, {}), now)
+        adj = rrf * boost * (1.0 + _HEBBIAN_ALPHA * math.log1p(rc)) * fresh
         fused.append({
             "entity": name,
             "score": round(adj, 6),

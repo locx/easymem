@@ -379,5 +379,96 @@
       "type": "object",
       "properties": {}
     }
+  },
+  {
+    "name": "search",
+    "description": "Search project memory by topic. Returns ranked entities with scores. The 'search' verb (alias of semantic_search_memory) for use across MCP clients.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Natural language search query"
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Number of results to return (default 5)",
+          "default": 5
+        },
+        "compact": {
+          "type": "boolean",
+          "description": "If true, return entity names + scores only (saves tokens)",
+          "default": false
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Absolute path to the project whose .easymem/ to query. Defaults to the server's startup project."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "recall",
+    "description": "Search project memory plus 1-hop graph neighbours of the top hits. The 'recall' verb — richer context than 'search' in one call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Natural language query"
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Number of seed results to expand (default 3)",
+          "default": 3
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Absolute path to the project whose .easymem/ to query. Defaults to the server's startup project."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "decide",
+    "description": "Record an architectural/design decision with rationale and alternatives. The 'decide' verb (alias of create_decision).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "What was decided"
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Why this approach was chosen"
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Rejected alternatives with reasons"
+        },
+        "scope": {
+          "type": "string",
+          "description": "What code/area this decision affects"
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Absolute path to the project whose .easymem/ to write. Defaults to the server's startup project."
+        }
+      },
+      "required": [
+        "title",
+        "rationale"
+      ]
+    }
   }
 ]

@@ -136,6 +136,7 @@ def load_locomo(
             queries.append({
                 "q": q,
                 "gold": gold,
+                "answer": str(qa.get("answer", "")),
                 "category": qa.get("category", 0),
                 "conv_idx": conv_idx,
             })

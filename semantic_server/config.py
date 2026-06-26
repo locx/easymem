@@ -2,6 +2,7 @@
 
 Safe anchor for all modules — imports nothing from the package.
 """
+import calendar
 import os
 import re
 import sys
@@ -39,6 +40,16 @@ RE_WORDS = re.compile(r'\w+')
 def now_iso():
     """Current UTC timestamp in ISO format."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def iso_to_epoch(ts):
+    """Parse an ISO 'Z' timestamp to UTC epoch seconds, or None if malformed."""
+    if not ts:
+        return None
+    try:
+        return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
 
 
 _DAYS_IN_MONTH = (0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)

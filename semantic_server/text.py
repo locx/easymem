@@ -29,6 +29,31 @@ _RE_MDY = re.compile(
 )
 _RE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
+# why: the MCP/CLI write tools persist agent-supplied text verbatim; scrub
+# secrets here so a credential never lands in graph.jsonl for later recall.
+# Kept in sync with the standalone hook copy in hooks/capture_tool_context.py.
+_SECRET_RE = re.compile(
+    r"AKIA[0-9A-Z]{16}"
+    r"|gh[pousr]_[0-9A-Za-z]{20,}"
+    r"|sk-[0-9A-Za-z_\-]{20,}"
+    r"|xox[abpros]-[0-9A-Za-z\-]{10,}"
+    r"|Bearer\s+[A-Za-z0-9._~+/=\-]{20,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|--(?:password|passwd|token|api-key|secret)(?:=|[ \t]+)\S+"
+    r"|\b[A-Z_]*(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|ACCESS_KEY)"
+    r"[A-Z0-9_]*=\S+"
+)
+_URL_CRED_RE = re.compile(
+    r"(\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)[^/\s@]+(?=@)"
+)
+
+
+def scrub_secrets(s: str) -> str:
+    if not s:
+        return s
+    s = _SECRET_RE.sub("[REDACTED]", s)
+    return _URL_CRED_RE.sub(r"\g<1>[REDACTED]", s)
+
 
 def extract_date_stems(text: str) -> list[str]:
     """Canonical 'date_YYYY_MM_DD' stems so DMY/MDY/ISO formats collide."""

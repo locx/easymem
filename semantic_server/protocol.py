@@ -1,6 +1,7 @@
 """MCP protocol: tool schemas and JSON-RPC 2.0 message handling."""
 import json
 import logging
+import os
 import sys
 
 from ._json import dumps as _fast_dumps
@@ -20,6 +21,7 @@ from .tools import (
     delete_entities,
     graph_stats,
     list_decisions,
+    recall_with_neighbours,
     remove_observations,
     rename_entity,
     update_decision_outcome,
@@ -44,19 +46,30 @@ except Exception as _e:
     log_event("SCHEMA_LOAD_FAIL", str(_e))
     TOOLS = []
 
-_index_loaded = False
+# why: a set, not a bool — one server can serve several workspaces (globally
+# configured MCP clients), so "loaded" must be tracked per memory_dir.
+_loaded_dirs: set = set()
 
 
 def _ensure_index(memory_dir):
-    global _index_loaded
-    if not _index_loaded:
-        try:
-            load_index(memory_dir)
-        except Exception as exc:
-            sys.stderr.write(
-                f"[memory] warn: lazy index load failed: {exc}\n"
-            )
-        _index_loaded = True
+    if memory_dir in _loaded_dirs:
+        return
+    try:
+        load_index(memory_dir)
+    except Exception as exc:
+        sys.stderr.write(
+            f"[memory] warn: lazy index load failed: {exc}\n"
+        )
+    _loaded_dirs.add(memory_dir)
+
+
+def _resolve_memory_dir(args, default_dir):
+    # why: let a globally-configured MCP client target a per-call workspace;
+    # falls back to the server's startup dir when the arg is absent.
+    root = args.pop("workspace_root", None)
+    if isinstance(root, str) and root.strip():
+        return os.path.join(os.path.expanduser(root.strip()), ".easymem")
+    return default_dir
 
 
 # Tool dispatch: each handler is (args, memory_dir) -> result
@@ -66,6 +79,13 @@ _TOOL_HANDLERS = {
         a.get("top_k", 5),
         branch=a.get("branch"),
         compact=a.get("compact", False),
+    ),
+    # CLI 'recall' verb has no raw twin (search + 1-hop); 'search'/'decide'
+    # are aliased to their handlers after the dict so they can't drift.
+    "recall": lambda a, md: recall_with_neighbours(
+        a.get("query", ""), md,
+        top_k=a.get("top_k", 3),
+        branch=a.get("branch"),
     ),
     "traverse_relations": lambda a, md: traverse_relations(
         a.get("entity", ""), md,
@@ -113,6 +133,11 @@ _TOOL_HANDLERS = {
     "graph_stats": lambda a, md: graph_stats(md),
 }
 
+# CLI-verb aliases for non-Claude-Code MCP clients — bound to the canonical
+# handlers so they can never diverge from them.
+_TOOL_HANDLERS["search"] = _TOOL_HANDLERS["semantic_search_memory"]
+_TOOL_HANDLERS["decide"] = _TOOL_HANDLERS["create_decision"]
+
 
 def _dispatch_tool_call(tool_name, args, memory_dir):
     handler = _TOOL_HANDLERS.get(tool_name)
@@ -133,8 +158,7 @@ def handle_message(msg, memory_dir):
         params = {}
 
     if method == "initialize":
-        global _index_loaded
-        _index_loaded = False
+        _loaded_dirs.clear()
         reset_session_stats()
         refresh_branch()
         init_recall_state(memory_dir)
@@ -172,14 +196,15 @@ def handle_message(msg, memory_dir):
                     "message": "server schema unavailable",
                 },
             }
-        _ensure_index(memory_dir)
         tool_name = params.get("name", "")
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
             args = {}
+        eff_dir = _resolve_memory_dir(args, memory_dir)
+        _ensure_index(eff_dir)
 
         try:
-            result = _dispatch_tool_call(tool_name, args, memory_dir)
+            result = _dispatch_tool_call(tool_name, args, eff_dir)
             if result is None:
                 return {
                     "jsonrpc": "2.0",

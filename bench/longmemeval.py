@@ -46,6 +46,7 @@ def load_longmemeval(path: str, limit: int | None = None
         queries.append({
             "q": q.get("question", ""),
             "gold": q.get("answer_session_ids") or [],
+            "answer": str(q.get("answer", "")),
             "category": q.get("question_type", ""),
             "question_id": q.get("question_id", ""),
         })

@@ -23,7 +23,7 @@ _USE_ANSI = (
     and os.environ.get("TERM", "") != "dumb"
 )
 
-_READ_ONLY_CMDS = {"search", "recall", "status", "diff", "doctor"}
+_READ_ONLY_CMDS = {"search", "recall", "status", "diff", "doctor", "insights"}
 
 
 def _resolve_memory_dir(argv):
@@ -610,42 +610,11 @@ def _unified_write(a, memory_dir):
 
 
 def _unified_recall(a, memory_dir):
-    query = a.get("query", "")
-    if not query:
-        return {"error": "query required"}
-    from semantic_server.search import search
-    from semantic_server.traverse import traverse_relations
-
-    sr = search(
-        query, memory_dir, top_k=a.get("top_k", 3),
-        branch=a.get("branch"), compact=True,
+    from semantic_server.tools import recall_with_neighbours
+    return recall_with_neighbours(
+        a.get("query", ""), memory_dir,
+        top_k=a.get("top_k", 3), branch=a.get("branch"),
     )
-    results = sr.get("results", [])
-    if not results:
-        return sr
-    enriched = []
-    for r in results[:3]:
-        entity = r.get("entity", "")
-        tr = traverse_relations(entity, memory_dir, "both", 1)
-        connected = [
-            {
-                "name": n.get("name", ""),
-                "type": n.get("entityType", ""),
-                "relation": n.get("_relation", ""),
-            }
-            for n in tr.get("nodes", [])
-            if n.get("name") != entity
-        ][:5]
-        enriched.append({
-            "entity": entity,
-            "score": r.get("score", 0),
-            "entityType": r.get("entityType", ""),
-            "connected": connected,
-        })
-    return {
-        "results": enriched,
-        "total_indexed": sr.get("total_indexed", 0),
-    }
 
 
 def _unified_decide(a, memory_dir):
@@ -680,6 +649,11 @@ def _unified_remove(a, memory_dir):
         or ([a.get("entity")] if a.get("entity") else [])
     )
     return delete_entities(names, memory_dir)
+
+
+def _unified_insights(a, memory_dir):
+    from semantic_server.tools import insights
+    return insights(memory_dir)
 
 
 def _unified_status(a, memory_dir):
@@ -1241,6 +1215,7 @@ def main():
         "decide": lambda a: _unified_decide(a, memory_dir),
         "remove": lambda a: _unified_remove(a, memory_dir),
         "status": lambda a: _unified_status(a, memory_dir),
+        "insights": lambda a: _unified_insights(a, memory_dir),
     }
 
     handler = dispatch.get(tool_name)

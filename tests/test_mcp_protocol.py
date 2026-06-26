@@ -1,0 +1,63 @@
+"""MCP JSON-RPC round-trip: initialize -> tools/list -> tools/call, plus
+per-call workspace_root resolution."""
+import json
+
+from bench.run import evaluate
+from semantic_server.protocol import handle_message
+
+
+def _seeded_workspace(tmp_path):
+    corpus = {
+        "entities": [
+            {"name": "auth.py", "entityType": "file",
+             "observations": ["JWT validation lives here",
+                              "export: login, verify_token"]},
+            {"name": "db.py", "entityType": "file",
+             "observations": ["postgres connection pool"]},
+        ],
+        "queries": [{"q": "jwt", "gold": ["auth.py"]}],
+    }
+    memory_dir = str(tmp_path / "proj" / ".easymem")
+    evaluate(corpus, memory_dir=memory_dir, top_k=5)
+    return str(tmp_path / "proj"), memory_dir
+
+
+def test_initialize_and_list(tmp_path):
+    md = str(tmp_path / ".easymem")
+    init = handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"}, md)
+    assert init["result"]["serverInfo"]["name"]
+    assert "tools" in init["result"]["capabilities"]
+
+    listed = handle_message(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, md)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    # CLI-verb aliases must be discoverable alongside the raw tools
+    assert {"search", "recall", "decide"} <= names
+    assert "semantic_search_memory" in names
+
+
+def test_tools_call_recall_with_workspace_root(tmp_path):
+    workspace, _ = _seeded_workspace(tmp_path)
+    # server started in an unrelated dir; the call targets the workspace
+    server_dir = str(tmp_path / "elsewhere" / ".easymem")
+    resp = handle_message({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "recall",
+                   "arguments": {"query": "jwt",
+                                 "workspace_root": workspace}},
+    }, server_dir)
+    assert "result" in resp
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    names = [r["entity"] for r in payload.get("results", [])]
+    assert "auth.py" in names
+
+
+def test_unknown_tool_errors(tmp_path):
+    md = str(tmp_path / ".easymem")
+    handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize"}, md)
+    resp = handle_message({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "nope", "arguments": {}},
+    }, md)
+    assert resp["error"]["code"] == -32601

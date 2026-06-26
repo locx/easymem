@@ -146,3 +146,24 @@ Run via `bench/longmemeval_full.py` — each query is evaluated against its own 
                       temporal-reasoning=0.940 (n=133)
 
 The single-session-preference category is the weakness — 0.60 vs 0.94–1.00 on every other category. Preference queries are short ("what type of rice is my favorite?") and the answer session is one of many similar food/lifestyle sessions; the retrieval signal is weak.
+
+## End-to-end LLM-judge + token-savings (`--judge`)
+
+The retrieval numbers above measure *retrieval* (R@5 / MRR). To report an
+end-to-end **answer accuracy** comparable to LLM-judge benchmarks, add
+`--judge`: for each query carrying a reference answer, it generates an answer
+from the retrieved top-k context and asks an LLM whether it matches the gold
+answer. It also reports **token-savings** — retrieved-context tokens vs. the
+full store — which is computed offline and needs no LLM.
+
+    python -m bench --dataset longmemeval --longmemeval-path ./longmemeval_s.json --judge --judge-limit 100
+
+Adds `judge_accuracy`, `token_savings`, and `n_judged` to the JSON.
+
+**Dev-only dependency — never shipped.** `--judge` lazy-imports `anthropic`
+and reads `ANTHROPIC_API_KEY` from the environment only. It is intentionally
+absent from `requirements.txt`: the plugin runtime stays zero-key and
+zero-cloud; only the benchmark (which never runs on a user's machine) may call
+an LLM. Without the package or key, `--judge` errors immediately and the plain
+retrieval run is unaffected. `token_savings` is approximate (≈4 chars/token,
+which cancels in the ratio).

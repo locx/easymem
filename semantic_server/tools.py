@@ -10,11 +10,11 @@ from collections import Counter
 
 from .config import (
     MAX_ENTITIES_PER_CALL,
-    MAX_GRAPH_BYTES,
     MAX_OBS_LENGTH,
     MAX_OBS_PER_CALL,
     MAX_RELATIONS_PER_CALL,
     get_current_branch,
+    iso_to_epoch,
     log_event,
     now_iso,
     session_stats,
@@ -30,9 +30,23 @@ from .graph import (
     load_graph_relations,
     rewrite_graph_locked,
 )
-from .text import normalize_name, normalize_type
+from .text import normalize_name, normalize_type, scrub_secrets
 
 _DECISION_PREFIX = "decision: "
+
+# why: a derived (not persisted) lifecycle view for hygiene surfacing —
+# re-recalled entities read as confirmed, old never-recalled ones as stale.
+_STATUS_CONFIRM_RECALLS = 2
+_STATUS_STALE_DAYS = 30
+
+
+def _clean_obs_list(obs):
+    """Scrub secrets, truncate, and drop blanks — the one observation-write
+    gate shared by every in-process write path."""
+    return [
+        scrub_secrets(o)[:MAX_OBS_LENGTH] for o in obs
+        if isinstance(o, str) and o.strip()
+    ]
 
 
 def _build_norm_index(existing_entities):
@@ -93,10 +107,7 @@ def create_entities(entities_input, memory_dir):
         obs = ent.get("observations", [])
         if not isinstance(obs, list):
             obs = [str(obs)]
-        obs = [
-            o[:MAX_OBS_LENGTH] for o in obs
-            if isinstance(o, str) and o.strip()
-        ]
+        obs = _clean_obs_list(obs)
 
         new_entries.append({
             "type": "entity",
@@ -244,10 +255,7 @@ def add_observations(entity_name, observations, memory_dir,
     if size_err:
         return size_err
 
-    new_obs = [
-        o[:MAX_OBS_LENGTH] for o in observations
-        if isinstance(o, str) and o.strip()
-    ]
+    new_obs = _clean_obs_list(observations)
     if not new_obs:
         return {
             "added": 0,
@@ -422,6 +430,7 @@ def _build_decision_obs(args):
         outcome = "pending"
         warnings.append("invalid outcome coerced to pending")
     obs.append(f"Outcome: {outcome}")
+    # why: scrubbing happens at the create_entities write gate this feeds.
     return obs, outcome, warnings
 
 
@@ -497,6 +506,21 @@ def create_decision(args, memory_dir):
     return resp
 
 
+def _mint_failure_guideline(title, lesson, memory_dir):
+    """Persist a failed decision's lesson as a guideline so it resurfaces in
+    future recalls as a preventive rule. Returns the name, or None on dup."""
+    clean = (title[len(_DECISION_PREFIX):]
+             if title.startswith(_DECISION_PREFIX) else title)
+    name = f"guideline: {clean}"[:200]
+    res = create_entities([{
+        "name": name,
+        "entityType": "guideline",
+        "observations": [f"[LESSON] {lesson}",
+                         f"From failed decision: {clean}"],
+    }], memory_dir)
+    return name if res.get("created") else None
+
+
 def update_decision_outcome(args, memory_dir):
     """Update a decision's outcome and record lesson."""
     if not isinstance(args, dict):
@@ -553,13 +577,18 @@ def update_decision_outcome(args, memory_dir):
             + (f" lesson: {lesson[:80]}"
                if lesson else ""),
         )
-        return {
+        resp = {
             "updated": entity_name,
             "outcome": outcome,
             "observations_added": result.get(
                 "added", 0
             ),
         }
+        if outcome == "failed" and isinstance(lesson, str) and lesson.strip():
+            minted = _mint_failure_guideline(title, lesson, memory_dir)
+            if minted:
+                resp["guideline_minted"] = minted
+        return resp
 
     return {
         "error": f"Decision '{title}' not found",
@@ -626,6 +655,35 @@ def _stats_pending_count(entities):
     )
 
 
+def _age_days(stamp, now):
+    t = iso_to_epoch(stamp)
+    return None if t is None else (now - t) / 86400.0
+
+
+def _stats_status_breakdown(entities):
+    """Derive a coarse active/confirmed/stale view from recall + age signals.
+
+    Not persisted — purely a hygiene summary for status/doctor.
+    """
+    try:
+        from .recall import recall_counts as _rc
+    except (ImportError, AttributeError):
+        _rc = {}
+    now = time.time()
+    counts = Counter()
+    for name, info in entities.items():
+        recalls = _rc.get(name, 0) or 0
+        if recalls >= _STATUS_CONFIRM_RECALLS:
+            counts["confirmed"] += 1
+            continue
+        age = _age_days(info.get("_updated") or info.get("_created"), now)
+        if recalls == 0 and age is not None and age > _STATUS_STALE_DAYS:
+            counts["stale"] += 1
+        else:
+            counts["active"] += 1
+    return dict(counts)
+
+
 def _stats_recall_summary():
     try:
         from .recall import recall_counts as _rc
@@ -674,6 +732,7 @@ def graph_stats(memory_dir):
             for n, c in top_recall
         ],
         "pending_decisions": n_pending,
+        "status_breakdown": _stats_status_breakdown(entities),
         "session": dict(session_stats),
     }
 
@@ -684,6 +743,33 @@ def graph_stats(memory_dir):
         f"{n_pending} pending decisions",
     )
     return result
+
+
+def insights(memory_dir):
+    """Summarize what a project's memory knows: types, status, top entities,
+    workflows, and recent decisions."""
+    entities = load_graph_entities(memory_dir)
+    relations = load_graph_relations(memory_dir)
+    type_counts, _ = _stats_counts(entities, relations)
+    workflows = [
+        n for n, info in entities.items()
+        if normalize_type(info.get("entityType", "")) == "workflow"
+    ]
+    decisions = list_decisions(memory_dir, limit=5)
+    recent = (decisions.get("decisions", [])
+              if isinstance(decisions, dict) else [])
+    return {
+        "entities": len(entities),
+        "relations": len(relations),
+        "type_breakdown": dict(type_counts.most_common(10)),
+        "status_breakdown": _stats_status_breakdown(entities),
+        "top_by_recall": [
+            {"name": n, "recalls": c}
+            for n, c in _stats_recall_summary()[:5]
+        ],
+        "workflows": workflows[:10],
+        "recent_decisions": recent[:5],
+    }
 
 
 def list_decisions(memory_dir, stale_days=None, limit=50):
@@ -906,3 +992,44 @@ def rename_entity(old_name, new_name, memory_dir):
     if outcome.get("dups"):
         resp["duplicate_relations_merged"] = outcome["dups"]
     return resp
+
+
+def recall_with_neighbours(query, memory_dir, top_k=3, branch=None):
+    """Search plus 1-hop neighbours for the top hits (the 'recall' verb).
+
+    Shared by the CLI and the MCP server so both expose identical behaviour.
+    """
+    if not query:
+        return {"error": "query required"}
+    # why: lazy imports — search imports from this module's siblings; importing
+    # them at top would risk a cycle.
+    from .search import search
+    from .traverse import traverse_relations
+
+    sr = search(query, memory_dir, top_k=top_k, branch=branch, compact=True)
+    results = sr.get("results", [])
+    if not results:
+        return sr
+    enriched = []
+    for r in results[:top_k]:
+        entity = r.get("entity", "")
+        tr = traverse_relations(entity, memory_dir, "both", 1)
+        connected = [
+            {
+                "name": n.get("name", ""),
+                "type": n.get("entityType", ""),
+                "relation": n.get("_relation", ""),
+            }
+            for n in tr.get("nodes", [])
+            if n.get("name") != entity
+        ][:5]
+        enriched.append({
+            "entity": entity,
+            "score": r.get("score", 0),
+            "entityType": r.get("entityType", ""),
+            "connected": connected,
+        })
+    return {
+        "results": enriched,
+        "total_indexed": sr.get("total_indexed", 0),
+    }

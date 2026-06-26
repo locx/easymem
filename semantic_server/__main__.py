@@ -1,11 +1,8 @@
-"""Entry point for: python3 -m semantic_server (deprecated)."""
-import sys
+"""Entry point for the MCP stdio server: python3 -m semantic_server.
 
-sys.stderr.write(
-    "warn: the MCP stdio server is deprecated; use the easymem CLI "
-    "(hooks and CLI are the supported entry points)\n"
-)
-
-from .server import main  # noqa: E402
+Supported entry point for MCP clients other than Claude Code (Cursor,
+Windsurf, Claude Desktop). On Claude Code the CLI + hooks are used instead.
+"""
+from .server import main
 
 main()
