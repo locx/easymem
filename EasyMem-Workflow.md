@@ -23,15 +23,17 @@ trips. Both are defined below.
 
 - Run from repo root, `main` checked out, **clean tree**.
 - Execute phases **strictly in order** — not optional, not reorderable.
-- **Tooling, or fail fast:** install `ruff` (`pip install -e ".[dev]"`) and `shellcheck` before
-  Phase 1 — neither is bundled, and a missing gate tool is a **hard stop**, not a silent skip. Run
+- **Tooling, or fail fast:** install the dev extras (`ruff`, `pytest`) with `./install.sh --dev`,
+  which provisions a project-local `.venv`; `source .venv/bin/activate` before running the gates.
+  Install `shellcheck` separately. Neither gate tool is bundled, and a missing one is a **hard
+  stop**, not a silent skip. Run
   `easymem doctor` to validate Python, model cache, and store up front.
 - **Baseline must be green before Phase 4:** `python3 -m pytest` (system Python 3.10.12; no `.venv`)
   — **218 passed, 5 skipped (~55s)** at authoring time. The baseline is *the counts Phase 1 records*,
   not the literal `218/5` (which drift as batches add tests). Vector tests **skip** (never fail) when
   the `model2vec` cache at `~/.cache/huggingface/` is absent, degrading the suite to lexical-only. A
   non-green baseline or a count mismatch vs `main` is a STOP, never an accepted known-failure.
-- `<DATE>` = today (ISO `YYYY-MM-DD`). Each run owns `docs/audit-<DATE>/`; a same-day re-run takes the
+- `<DATE>` = today (ISO `YYYY-MM-DD`). Each run owns `docs/audit/audit-<DATE>/`; a same-day re-run takes the
   next suffix (`-1`, `-2`, …) and never overwrites a prior run.
 
 ---
@@ -56,7 +58,7 @@ trips. Both are defined below.
 ```
 
 **Artifacts** (`analysis_report.md`, `implementation_plan.md`, `tasklist.md`, `progress.md`) live
-under `docs/audit-<DATE>[-N]/`. Keep them in **one** home — either committed on the worktree branch
+under `docs/audit/audit-<DATE>[-N]/`. Keep them in **one** home — either committed on the worktree branch
 or untracked in the main checkout — never split. Either way `main` carries no audit folder; they are
 unstaged before the final squash. (`docs/` is outside the `ruff` scope, so audit prose never trips
 the lint gate.)
@@ -173,7 +175,7 @@ Repo-intelligence pass on EasyMem (local-first knowledge-graph memory plugin). D
   STOP) and 2–3 timings of the build-store → rebuild-index → search → recall path over a throwaway
   temp store. Tag the record with `git rev-parse HEAD`. (No egress baseline file: EasyMem has no
   online sources, so the Phase 4 gate asserts the egress set is empty outright, not a diff.)
-OUTPUT → docs/audit-<DATE>/analysis_report.md: 1 architecture · 2 module/store-flow map ·
+OUTPUT → docs/audit/audit-<DATE>/analysis_report.md: 1 architecture · 2 module/store-flow map ·
   3 subsystem notes · 4 privacy + scrub audit · 5 durability/lock audit · 6 risk hotspots ·
   7 tech-debt · 8 baseline (test counts + timings + empty-egress confirmation).
 ```
@@ -210,7 +212,7 @@ Tests required for any code change; shell stays shellcheck-clean.
 **Dispatch** `Plan`. No code.
 
 ```text
-Reorder docs/audit-<DATE>/{analysis_report,implementation_plan,tasklist}.md for safe, high-leverage
+Reorder docs/audit/audit-<DATE>/{analysis_report,implementation_plan,tasklist}.md for safe, high-leverage
 execution. Verify privacy/durability/correctness first, then reliability, perf, memory, debt. Add
 missing high-impact tasks; merge redundant; split oversized; drop cosmetic tasks with no evidence.
 Isolate into their own batch any task touching graph.py/io_utils.py/tools_schema.json, the
@@ -443,7 +445,7 @@ billed, user-triggered only).
 Each round: triage correctness/regression first, then reuse/simplification/efficiency; fix every
 correctness finding via Phase 7; re-run tests (+ smoke if relevant) to green; then **re-review** — a
 fix can introduce a fresh bug. Repeat until **two consecutive rounds surface no correctness/regression
-finding**. Circuit breaker applies. Record each round into `docs/audit-<DATE>/`. A finding needing
+finding**. Circuit breaker applies. Record each round into `docs/audit/audit-<DATE>/`. A finding needing
 egress / a weakened scrubber or lock is NEEDS-HUMAN.
 
 ## Phase 9 — Artifact Cleanup
@@ -453,7 +455,7 @@ Inside the worktree, before the final diff. Prune scratch so the diff is exactly
 - **Remove:** throwaway smoke stores and temp dirs (`/tmp/em-smoke-*`, `/tmp/em-egress-*`); dead debug
   scratch (commented probes, ad-hoc prints); any accidentally-staged `.easymem/` data, `*.npz`, or
   secret-bearing file (MUST NOT reach a commit, §1.3).
-- **Keep** (worktree branch only): `docs/audit-<DATE>/{analysis_report,implementation_plan,tasklist}.md`
+- **Keep** (worktree branch only): `docs/audit/audit-<DATE>/{analysis_report,implementation_plan,tasklist}.md`
   (tasklist all `[x]`) and the before/after retrieval captures. Both they and the checkpoint commits
   are squashed/unstaged at merge, so `main` keeps none.
 
@@ -481,7 +483,7 @@ Present, terse:
 
 **Merge happens only after this approval and an explicit imperative** (§1.1). Integrate as a **single
 squashed commit**: `git merge --squash <worktree-branch>`, then unstage the audit folder
-(`git restore --staged docs/audit-<DATE>[-N]/`), then one `git commit` summarizing the whole change
+(`git restore --staged docs/audit/audit-<DATE>[-N]/`), then one `git commit` summarizing the whole change
 (no intermediate-commit references) — see `superpowers:finishing-a-development-branch`. Tear down the
 worktree on merge; discard it on rejection — nothing reached `main`.
 
@@ -500,7 +502,7 @@ worktree on merge; discard it on rejection — nothing reached `main`.
 | Smoke gate (store·AI·hook) | throwaway `.easymem` → write/merge/search/recall → ZERO egress (hard) + scrubber-held (hard) + no fusion regression + round-trip + no lost/corrupt write |
 | Integration review | fresh-eyes over `$BASE..HEAD`, two clean rounds (P8; circuit breaker) |
 | Progress | flip tasklist `[ ]`→`[x]`; echo ✅/⬜ + M/T %, batch N of B, est-vs-actual |
-| Cleanup | prune scratch; keep `docs/audit-<DATE>/`; worktree torn down on squash-merge |
+| Cleanup | prune scratch; keep `docs/audit/audit-<DATE>/`; worktree torn down on squash-merge |
 
 **The one rule above all:** a green build is never worth breaking local-first or durability. Every
 byte stays under `.easymem/`, no secret reaches `graph.jsonl`, no socket leaves the machine, the lock

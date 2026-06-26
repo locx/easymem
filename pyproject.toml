@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.4"]
+dev = ["pytest>=8", "ruff>=0.4", "shellcheck-py>=0.10"]
 
 # Deployed by install.sh / the plugin, not pip; packaging config exists so
 # tooling (ruff, pytest, pip download of dev deps) has one source of truth.

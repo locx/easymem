@@ -98,9 +98,19 @@ the same file concurrently.
 - **Batches run sequentially** — they share files and the smoke needs a stable before-state. Run the full
   suite every batch. Sole exception: split provably file-disjoint batches across separate worktrees only
   when a measured wall-clock win justifies the extra merge + re-test.
+- **Progress heartbeat (~30s).** Surface progress on a fixed cadence, not only at phase/batch boundaries —
+  some UIs (e.g. VS Code) can't open the live `/workflows` viewer, so the heartbeat is the portable
+  progress channel. While any phase, batch, or fan-out agent is in flight, append a one-line snapshot to
+  `progress.md` every ~30s: `<ISO-time> · phase <P> · batch <N>/<B> · agents <active>a/<done>d · docs
+  <written> · findings <count> · last <event>`. Drive it from a lightweight poller that tails the run
+  state (the `Workflow` journal when encoded as one) and writes through `Write`/`log()` — never a shell
+  `>>`/`tee` redirect. A self-paced agent wake-up floors at ~60s, so use the poller for true 30s ticks and
+  reserve wake-ups for the coarser ~60s in-channel status. The heartbeat is status only: it never relaxes
+  a gate, a STOP, or an invariant, and never authorizes a mutation.
 
 For long runs, encode this as a `Workflow` script (`pipeline` / `parallel` / loop-until-dry / verify)
-for a token budget and journaled resume.
+for a token budget and journaled resume; emit a `log()` line at every fan-out and barrier-join so the
+journal the heartbeat tails stays current.
 
 ---
 
@@ -463,7 +473,7 @@ reaches `main` without approval.
 | Smoke gate (store·AI·hook) | `scripts/smoke.sh`: throwaway `.easymem` → ZERO egress + scrubber-held (both hard) + no lost/corrupt write + retrieval live + no fusion regression |
 | Integration review | fresh-eyes over `$BASE..HEAD`; ends on two consecutive rounds with **zero correctness/regression** findings (no seen-set; reuse/efficiency findings don't block). Differs from P6's "nothing-new" rule |
 | Removals (cleanup run) | grep-proof zero callers + suite green; public-API/entry-point/MCP/whole-file → NEEDS-HUMAN / emit `rm` |
-| Progress | flip tasklist `[ ]`→`[x]`; echo ✅/⬜ + M/T %, batch N of B, est-vs-actual |
+| Progress | ~30s heartbeat → `progress.md` (Orchestration); per-batch: flip tasklist `[ ]`→`[x]`, echo ✅/⬜ + M/T %, batch N of B, est-vs-actual |
 
 **The one rule above all:** a green build is never worth breaking local-first or durability. Every byte
 stays under `.easymem/`, no secret reaches `graph.jsonl`, no socket leaves the machine, the lock and
