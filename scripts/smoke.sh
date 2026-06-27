@@ -12,12 +12,15 @@ mkdir -p "$SMOKE"; cd "$SMOKE" || exit 1
 trap 'kill "${EGRESS_PID:-}" 2>/dev/null; rm -f "$INPUT_JSON"; cd - >/dev/null' EXIT
 SENT='ghp_SMOKESENTINEL0000000000000000'   # unique, so the scrub assert can't hit the [REDACTED] placeholder
 
-# egress poller — watch the easymem process tree under $$ (this shell never opens a socket). Scope to
+# egress poller — watch the full easymem descendant tree under $$ (this shell never opens a socket).
+# Walk descendants recursively, not a fixed two levels — a model-fetch worker can sit deeper. Scope to
 # descendants only; a global `pgrep -f easymem` would also catch the user's real session (false leak).
+# Sampling can still miss a sub-200ms socket: for a definitive check, run this smoke once in a
+# no-network sandbox.
 EGRESS="/tmp/em-egress-$$.log"; : >"$EGRESS"
+descendants() { local p; for p in $(pgrep -P "$1" 2>/dev/null); do echo "$p"; descendants "$p"; done; }
 ( while :; do
-    kids=$(pgrep -P "$$" 2>/dev/null)
-    for p in $kids $(for k in $kids; do pgrep -P "$k" 2>/dev/null; done); do
+    for p in $(descendants "$$"); do
       lsof -nP -a -p "$p" -iTCP -sTCP:ESTABLISHED 2>/dev/null | awk 'NR>1{print $9}'
     done | awk -F'->' 'NF>1{print $2}' | grep -Ev '^127\.0\.0\.1|^\[::1\]' >>"$EGRESS"
     sleep 0.2
@@ -55,7 +58,15 @@ python3 -c 'import json,sys; [json.loads(l) for l in open(sys.argv[1]) if l.stri
 # RETRIEVAL — the index is live and returns a seeded entity (not a hollow results=0 drive).
 echo "$hits" | grep -q '"entity": "RACE_' || { echo "RETRIEVAL FAIL: no hit for the query"; exit 1; }
 # COVERAGE — build the vector index so the fusion verdict is real. Maintenance loads the model from
-# local cache; run it AFTER the egress window so a cold model fetch can't false-trip GATE 1.
-python3 "$REPO/maintenance.py" "$SMOKE" >/dev/null 2>&1
-[ -s "$EASYMEM_DIR/vec_index.npz" ] && COV="fusion (vector+TF-IDF)" || COV="lexical-only — VECTOR UNVERIFIED"
+# local cache; run it AFTER the egress window so a cold model fetch can't false-trip GATE 1. Capture its
+# status: a missing model degrades to lexical-only, but any OTHER failure is a regression, not a silent
+# degrade.
+merr=$(python3 "$REPO/maintenance.py" "$SMOKE" 2>&1 >/dev/null); mrc=$?
+if [ -s "$EASYMEM_DIR/vec_index.npz" ]; then
+  COV="fusion (vector+TF-IDF)"
+elif [ "$mrc" -ne 0 ] && ! printf '%s' "$merr" | grep -qiE 'cache|not found|no such|offline|model'; then
+  echo "COVERAGE FAIL: maintenance errored (not a missing-model degrade): $merr"; exit 1
+else
+  COV="lexical-only — VECTOR UNVERIFIED"
+fi
 echo "smoke OK: no egress, scrubber held, both writes intact, retrieval live; ranking coverage: $COV"
