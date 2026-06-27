@@ -9,7 +9,7 @@ REPO=$(git rev-parse --show-toplevel); EM="$REPO/easymem"
 SMOKE="/tmp/em-smoke-$$"; export EASYMEM_DIR="$SMOKE/.easymem"
 GRAPH="$EASYMEM_DIR/graph.jsonl"; INPUT_JSON="/tmp/em-toolctx-$$.json"
 mkdir -p "$SMOKE"; cd "$SMOKE" || exit 1
-trap 'kill "${EGRESS_PID:-}" 2>/dev/null; rm -f "$INPUT_JSON"; cd - >/dev/null' EXIT
+trap 'kill "${EGRESS_PID:-}" 2>/dev/null; rm -f "$INPUT_JSON"; cd - >/dev/null; rm -rf "$SMOKE" "$EGRESS"' EXIT
 SENT='ghp_SMOKESENTINEL0000000000000000'   # unique, so the scrub assert can't hit the [REDACTED] placeholder
 
 # egress poller — watch the full easymem descendant tree under $$ (this shell never opens a socket).
