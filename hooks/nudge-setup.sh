@@ -36,11 +36,11 @@ THROTTLE="/tmp/.claude-easymem-nudge-$PROJECT_HASH"
 [ -f "$SUPPRESS_MARKER" ] && exit 0
 
 # --- 24h throttle ---
+# shellcheck source=hooks/_common.sh
+. "$(dirname "$0")/_common.sh"
 if [ -f "$THROTTLE" ]; then
-    LAST=$(date -r "$THROTTLE" +%s 2>/dev/null \
-        || stat -c%Y "$THROTTLE" 2>/dev/null \
-        || echo 0)
-    [ "$(( $(date +%s) - LAST ))" -lt 86400 ] && exit 0
+    LAST=$(_file_mtime "$THROTTLE")
+    [ "$(( $(date +%s) - ${LAST:-0} ))" -lt 86400 ] && exit 0
 fi
 touch "$THROTTLE"
 

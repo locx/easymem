@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import uuid
@@ -101,3 +102,55 @@ def test_additional_context_has_framing_line(tmp_path):
         "[easymem] Stored project memory below"
     )
     assert "fragile module" in ctx
+
+
+# why: the scrub patterns are hand-copied into three files; pin them so a
+# change to one copy that isn't mirrored fails CI instead of silently leaking.
+_CANON = ROOT / "semantic_server" / "text.py"
+_HOOK = ROOT / "hooks" / "capture_tool_context.py"
+_SHELL = ROOT / "import-easymem.sh"
+_FRAG_RE = re.compile(r'r"([^"]*)"')
+
+
+def _scrub_patterns(path):
+    text = path.read_text(encoding="utf-8")
+
+    def block(name):
+        start = text.index(f"{name} = re.compile(")
+        end = text.index("\n)", start)
+        return "".join(_FRAG_RE.findall(text[start:end]))
+
+    return block("_SECRET_RE"), block("_URL_CRED_RE")
+
+
+def test_scrub_pattern_copies_in_sync():
+    canon = _scrub_patterns(_CANON)
+    # why: guard a vacuous pass — if a copy switched r-string quoting the
+    # extractor would return "" for all and equality would hold trivially.
+    assert canon[0] and canon[1]
+    assert _scrub_patterns(_HOOK) == canon
+    assert _scrub_patterns(_SHELL) == canon
+
+
+_SECRET_CORPUS = [
+    ("access key AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE"),
+    ("token ghp_%s end" % ("a" * 36), "ghp_" + "a" * 36),
+    ("key sk-%s end" % ("b" * 32), "sk-" + "b" * 32),
+    ("slack xoxb-%s end" % ("1" * 24), "xoxb-" + "1" * 24),
+    ("auth Bearer %s end" % ("c" * 40), "c" * 40),
+    ("body -----BEGIN RSA PRIVATE KEY----- tail",
+     "-----BEGIN RSA PRIVATE KEY-----"),
+    ("run --password=hunter2 db", "hunter2"),
+    ("export FOO_TOKEN=abc123def456 && go", "abc123def456"),
+    ("clone https://user:p4ss@example.com/r.git", "p4ss"),
+]
+
+
+def test_python_scrub_copies_redact_identically():
+    from semantic_server.text import scrub_secrets
+    cap = _load()
+    for text, secret in _SECRET_CORPUS:
+        canon = scrub_secrets(text)
+        assert cap._scrub(text) == canon, secret
+        assert secret not in canon, secret
+        assert "[REDACTED]" in canon, secret

@@ -35,7 +35,7 @@ from .cache import (
     estimate_size,
     maybe_evict_caches,
 )
-from .io_utils import iter_jsonl
+from .io_utils import iter_jsonl, encode_entry_safe
 from .text import normalize_type
 
 
@@ -126,6 +126,8 @@ def _handle_entity_entry(entities, obs_keys, obj):
     dedup-merge across appends. Kept out of the entity dict so the
     data model stays clean.
     """
+    # why: capped + field-allowlisted hot-cache path — deliberately distinct
+    # from load_graph_full's uncapped full-fidelity view; never unify them.
     name = obj.get("name", "")
     if isinstance(name, str):
         name = name.strip()
@@ -736,10 +738,7 @@ def _build_rewrite_line(entry_type, name_or_r, info_or_none):
             return None
         entry = {"type": "relation"}
         entry.update(info_or_none)
-    try:
-        return _fast_dumps(entry) + "\n"
-    except (TypeError, ValueError, OverflowError):
-        return None
+    return encode_entry_safe(entry)
 
 
 def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
@@ -778,10 +777,11 @@ def rewrite_graph(memory_dir, entities_dict, relations, *, others=None,
             yield line
         # why: non-entity/relation rows must survive a rewrite, not be dropped.
         for o in (others or []):
-            try:
-                yield _fast_dumps(o) + "\n"
-            except (TypeError, ValueError, OverflowError):
+            line = encode_entry_safe(o)
+            if line is None:
                 dropped += 1
+            else:
+                yield line
 
     try:
         with open(tmp, "w", encoding="utf-8") as f:

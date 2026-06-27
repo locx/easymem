@@ -177,7 +177,6 @@ def _parse_positional(args):
 
 def _merge_pending(memory_dir):
     """Hold .graph.lock during merge so hook appends can't race it."""
-    import time as _time
     from contextlib import contextmanager
     from pathlib import Path
     from semantic_server.io_utils import merge_pending
@@ -205,7 +204,7 @@ def _merge_pending(memory_dir):
             yield
             return
         with open(mem / ".graph.lock", "a") as lf:
-            deadline = _time.monotonic() + 5.0
+            deadline = time.monotonic() + 5.0
             delay = 0.05
             while True:
                 try:
@@ -215,11 +214,11 @@ def _merge_pending(memory_dir):
                     )
                     break
                 except (IOError, OSError):
-                    if _time.monotonic() >= deadline:
+                    if time.monotonic() >= deadline:
                         # why: server holds the lock; defer the merge to the
                         # next invocation rather than hang or merge unlocked.
                         raise TimeoutError
-                    _time.sleep(delay)
+                    time.sleep(delay)
                     delay = min(delay * 2, 0.5)
             try:
                 yield

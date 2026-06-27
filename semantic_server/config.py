@@ -33,6 +33,9 @@ MAX_OBS_PER_CALL = 50
 MAX_OBS_LENGTH = 5000
 MAX_GRAPH_BYTES = 50_000_000
 MAX_CACHED_OBS = 20
+# why: bound the per-session re-rank tokenization cache so it can't grow with
+# every distinct entity ranked; well above any single query's re-rank pool.
+MAX_RERANK_TOK_CACHE = 4096
 
 RE_WORDS = re.compile(r'\w+')
 

@@ -9,12 +9,12 @@
 SAFE_SID="${CLAUDE_SESSION_ID//[^a-zA-Z0-9_-]/_}"
 MARKER="/tmp/.claude-easymem-reminded-${SAFE_SID}"
 
+# shellcheck source=hooks/_common.sh
+. "$(dirname "$0")/_common.sh"
+
 # Time-based throttle: re-nudge if >30 min since last
 if [ -f "$MARKER" ]; then
-    LAST=$(date -r "$MARKER" +%s 2>/dev/null \
-        || stat -c%Y "$MARKER" 2>/dev/null \
-        || python3 -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$MARKER" 2>/dev/null \
-        || echo 0)
+    LAST=$(_file_mtime "$MARKER")
     AGE=$(( $(date +%s) - ${LAST:-0} ))
     if [ "$AGE" -lt 1800 ]; then
         exit 0
@@ -38,7 +38,7 @@ if [ -f "$LAST_START" ] && [ -f "$GRAPH" ]; then
     START_TS=$(cat "$LAST_START" 2>/dev/null || echo "")
     if [ -n "$START_TS" ]; then
         # Count entities updated since session start (env-var pattern — no shell interpolation)
-        UPDATED=$(GRAPH_PATH="$GRAPH" SESSION_START="$START_TS" python3 - <<'PYEOF'
+        UPDATED=$(GRAPH_PATH="$GRAPH" SESSION_START="$START_TS" python3 - <<'PYEOF' 2>/dev/null || echo "0,0"
 import json, os, sys
 ts = os.environ.get('SESSION_START', '')
 graph = os.environ.get('GRAPH_PATH', '')
@@ -64,7 +64,7 @@ except Exception:
     pass
 print(f'{n},{u}')
 PYEOF
-        2>/dev/null || echo "0,0")
+        )
         NEW_C=$(echo "$UPDATED" | cut -d, -f1)
         UPD_C=$(echo "$UPDATED" | cut -d, -f2)
         # Numeric guards: treat non-numeric values as 0

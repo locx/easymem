@@ -43,13 +43,24 @@ def partition_graph(path):
     return entities, relations, others
 
 
+def encode_entry_safe(entry):
+    """Serialize one entry to a JSONL line, or None if unserializable.
+
+    Single encoder so the rewrite and bulk-write paths can't drift; callers
+    own their own drop-accounting on a None return.
+    """
+    try:
+        return _dumps(entry) + "\n"
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _safe_jsonl_lines(entries):
     """Yield JSONL lines, skipping unserializable entries."""
     for e in entries:
-        try:
-            yield _dumps(e) + "\n"
-        except (TypeError, ValueError, OverflowError):
-            continue
+        line = encode_entry_safe(e)
+        if line is not None:
+            yield line
 
 
 def write_jsonl(path, entries):

@@ -22,13 +22,8 @@ GRAPH="${EASYMEM_DIR}/graph.jsonl"
 
 SAFE_SID="${CLAUDE_SESSION_ID//[^a-zA-Z0-9_-]/_}"
 
-# Portable stat helper: get file mtime as epoch seconds
-_file_mtime() {
-    date -r "$1" +%s 2>/dev/null \
-        || stat -c%Y "$1" 2>/dev/null \
-        || python3 -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$1" 2>/dev/null \
-        || echo 0
-}
+# shellcheck source=hooks/_common.sh
+. "${SCRIPT_DIR}/_common.sh"
 
 # Clean up stale toolcap temp files older than 1 hour
 find /tmp -maxdepth 1 -name '.claude-easymem-toolcap-*' -mmin +60 -delete 2>/dev/null || true

@@ -262,6 +262,7 @@ cleanup_global() {
     if [ -d "${CLAUDE_HOME}/easymem" ]; then
         echo "  Found ~/.claude/easymem/"
         if confirm "Delete ${CLAUDE_HOME}/easymem/ ?"; then
+            # shellcheck disable=SC2088  # ~ is a display label, not an expanded path
             remove_path "${CLAUDE_HOME}/easymem" "~/.claude/easymem/"
         fi
     else
@@ -269,10 +270,11 @@ cleanup_global() {
     fi
 
     # 2. Remove deployed hook scripts
-    HOOKS=(prime-easymem.sh prime-on-compact.sh prime-slots.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
+    HOOKS=(_common.sh prime-easymem.sh prime-on-compact.sh prime-slots.sh capture-decisions.sh nudge-setup.sh capture-tool-context.sh capture_tool_context.py smart_recall.py)
     for hook in "${HOOKS[@]}"; do
         if [ -e "${CLAUDE_HOME}/hooks/${hook}" ]; then
             if confirm "Remove hook ${hook}?"; then
+                # shellcheck disable=SC2088  # ~ is a display label, not an expanded path
                 remove_path "${CLAUDE_HOME}/hooks/${hook}" "~/.claude/hooks/${hook}"
             fi
         else

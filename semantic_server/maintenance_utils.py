@@ -172,6 +172,8 @@ def _safe_obs_dedup(observations):
         return []
     seen = set()
     result = []
+    # why: untagged keys intentionally collapse a string equal to a dict's
+    # JSON here (aggressive consolidation), unlike the tagged load-path key.
     for o in observations:
         key = (o if isinstance(o, str) else json.dumps(o, sort_keys=True))
         if key not in seen:

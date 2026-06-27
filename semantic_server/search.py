@@ -4,13 +4,14 @@ import math
 import os as _os
 import sys
 import time as _time
-from collections import Counter
+from collections import Counter, OrderedDict
 
 from .config import (
     MAIN_BRANCHES,
     MAX_CACHED_OBS,
     MAX_CANDIDATES,
     MAX_QUERY_CHARS,
+    MAX_RERANK_TOK_CACHE,
     MAX_TOP_K,
     RE_WORDS,
     RRF_K,
@@ -163,17 +164,18 @@ def _session_from_source(source):
     return parts[1]
 
 
-def _load_source_map(memory_dir, names):
-    """Recover _source for names from the (warm) entity cache."""
+def _load_source_map(names, entities):
+    """Recover _source for names from an already-loaded entities map.
+
+    why: search() already holds the warm entity map; reusing it avoids a
+    second load_graph_entities call per diversified query.
+    """
     wanted = set(names)
     if not wanted:
         return {}
-    # why: the cache now retains _source, so a full graph.jsonl scan per
-    # diversified query is no longer needed.
-    ents = load_graph_entities(memory_dir)
     out: dict[str, str] = {}
     for name in wanted:
-        src = ents.get(name, {}).get("_source")
+        src = entities.get(name, {}).get("_source")
         if isinstance(src, str) and src:
             out[name] = src
     return out
@@ -309,7 +311,7 @@ def _tfidf_search_impl(query, memory_dir, top_k, current_branch, idx):
             "current_branch": current_branch}
 
 
-_corpus_tok_cache: dict = {"key": None, "data": {}}
+_corpus_tok_cache: dict = {"key": None, "data": OrderedDict()}
 
 
 def _idf_rerank(query, fused, top_k, idf, current_entities, alias_map):
@@ -324,7 +326,7 @@ def _idf_rerank(query, fused, top_k, idf, current_entities, alias_map):
     cache_key = (_ec.get("mtime"), _alias_cache["mtime"], _alias_cache["dir"])
     if _corpus_tok_cache["key"] != cache_key:
         _corpus_tok_cache["key"] = cache_key
-        _corpus_tok_cache["data"] = {}
+        _corpus_tok_cache["data"] = OrderedDict()
     cached = _corpus_tok_cache["data"]
     scored = []
     for orig_rank, r in enumerate(fused):
@@ -336,6 +338,12 @@ def _idf_rerank(query, fused, top_k, idf, current_entities, alias_map):
             text = " ".join(o for o in obs if isinstance(o, str))
             c_toks = set(_tokenize_query(text, alias_map))
             cached[name] = c_toks
+            # why: LRU-bound so a long session can't grow this per entity ever
+            # ranked; eviction only forces a recompute, never changes ranking.
+            if len(cached) > MAX_RERANK_TOK_CACHE:
+                cached.popitem(last=False)
+        else:
+            cached.move_to_end(name)
         # why: out-of-vocab tokens have no corpus statistics; treat as 0
         # so re-rank only acts on terms the index actually knows.
         weight = sum(idf.get(t, 0.0) for t in (q_toks & c_toks))
@@ -428,10 +436,10 @@ def search(query, memory_dir, top_k=5, branch=None, compact=False,
         })
     fused.sort(key=lambda r: r["score"], reverse=True)
     if max_per_session:
-        # Pull _source only for fused candidates — bounded IO, since the
-        # index/metadata path drops _source on load.
+        # Pull _source only for fused candidates — bounded, reusing the
+        # entity map already loaded above instead of a second scan.
         src_map = _load_source_map(
-            memory_dir, [r["entity"] for r in fused],
+            [r["entity"] for r in fused], current_entities,
         )
         for r in fused:
             r["_session"] = _session_from_source(

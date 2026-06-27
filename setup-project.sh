@@ -200,7 +200,6 @@ PYEOF
 
 # ---- 8. Add/update EasyMem plugin instructions in CLAUDE.md ----
 CLAUDE_MD="${PROJECT_DIR}/CLAUDE.md"
-EASYMEM_MARKER="## EasyMem (Easy Memory)"
 
 EASYMEM_SECTION='## EasyMem (Easy Memory)
 

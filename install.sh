@@ -8,13 +8,15 @@ set -euo pipefail
 VECTOR_INSTALL=1
 WIRE_HOOKS=1
 DEV_SETUP=0
+FORCE_MODEL=0
 
 usage() {
     cat <<EOF
-Usage: install.sh [--no-vector] [--no-hooks] [--minimal] [--dev]
+Usage: install.sh [--no-vector] [--no-hooks] [--minimal] [--dev] [--force-model]
 
 Default: installs everything (vector retrieval + hooks). Flags opt out.
 --dev also creates a project-local .venv with an editable install + dev extras.
+--force-model re-fetches the embedding model even if the manifest is current.
 EOF
     exit 1
 }
@@ -25,6 +27,7 @@ while [ $# -gt 0 ]; do
         --no-hooks)  WIRE_HOOKS=0 ;;
         --minimal)   VECTOR_INSTALL=0; WIRE_HOOKS=0 ;;
         --dev)       DEV_SETUP=1 ;;
+        --force-model) FORCE_MODEL=1 ;;
         --help|-h)   usage ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac
@@ -95,6 +98,7 @@ if [ $VECTOR_INSTALL -eq 1 ]; then
     echo "[4/5] Setting up vector retrieval..."
     VENV_DIR="${EASYMEM_DIR}/venv"
     VENV_PY="${VENV_DIR}/bin/python3"
+    MODEL="minishlab/potion-retrieval-32M"
 
     if [ ! -x "$VENV_PY" ]; then
         python3 -m venv "$VENV_DIR"
@@ -110,28 +114,51 @@ if [ $VECTOR_INSTALL -eq 1 ]; then
     }
     echo "  [ok] requirements.txt installed"
 
-    # One interpreter spawn: preload model AND read SHA for the manifest.
-    # HF cache is content-addressed, so a partial download won't poison retry.
-    MODEL_REV=$("$VENV_PY" -c '
+    printf '%s\n' "$VENV_PY" > "${EASYMEM_DIR}/.venv-python"
+
+    # why: the model never changes between runs; skip the network model_info +
+    # re-preload when the manifest already records it and it loads offline.
+    MANIFEST_PATH="${EASYMEM_DIR}/.install-manifest"
+    if [ $FORCE_MODEL -eq 0 ] \
+       && MANIFEST="$MANIFEST_PATH" MODEL="$MODEL" "$VENV_PY" - <<'PYEOF' 2>/dev/null
+import json, os, sys
+model = os.environ["MODEL"]
+try:
+    with open(os.environ["MANIFEST"], encoding="utf-8") as f:
+        if json.load(f).get("model") != model:
+            sys.exit(1)
+except Exception:
+    sys.exit(1)
+os.environ["HF_HUB_OFFLINE"] = os.environ["TRANSFORMERS_OFFLINE"] = "1"
+from model2vec import StaticModel
+StaticModel.from_pretrained(model)
+PYEOF
+    then
+        echo "  [skip] model (manifest current; offline-loadable — --force-model to refetch)"
+        echo ""
+    else
+        # why: one spawn for preload + SHA avoids a second cold start; the HF
+        # cache is content-addressed so a partial download won't poison a retry.
+        MODEL_REV=$(MODEL="$MODEL" "$VENV_PY" -c '
+import os
 from model2vec import StaticModel
 from huggingface_hub import HfApi
-StaticModel.from_pretrained("minishlab/potion-retrieval-32M")
+model = os.environ["MODEL"]
+StaticModel.from_pretrained(model)
 try:
-    print(HfApi().model_info("minishlab/potion-retrieval-32M").sha or "")
+    print(HfApi().model_info(model).sha or "")
 except Exception:
     print("")
 ' 2>/dev/null) || {
-        echo "  ERROR: model preload failed; re-run install.sh to retry" >&2
-        exit 1
-    }
+            echo "  ERROR: model preload failed; re-run install.sh to retry" >&2
+            exit 1
+        }
 
-    printf '%s\n' "$VENV_PY" > "${EASYMEM_DIR}/.venv-python"
-
-    MODEL_REV="$MODEL_REV" VENV_DIR="$VENV_DIR" \
-        MANIFEST="${EASYMEM_DIR}/.install-manifest" python3 - <<'PYEOF'
+        MODEL_REV="$MODEL_REV" VENV_DIR="$VENV_DIR" MODEL="$MODEL" \
+            MANIFEST="$MANIFEST_PATH" python3 - <<'PYEOF'
 import json, os, time
 data = {
-    "model": "minishlab/potion-retrieval-32M",
+    "model": os.environ["MODEL"],
     "model_rev": os.environ["MODEL_REV"],
     "venv": os.environ["VENV_DIR"],
     "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -140,8 +167,9 @@ with open(os.environ["MANIFEST"], "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PYEOF
-    echo "  [ok] model + manifest"
-    echo ""
+        echo "  [ok] model + manifest"
+        echo ""
+    fi
 else
     echo "[4/5] [skip] vector retrieval (--no-vector)"
     echo "  Hybrid search disabled — TF-IDF only."
@@ -151,7 +179,7 @@ fi
 # --- Step 5: Deploy hooks + wire settings.json ---
 echo "[5/5] Deploying hooks..."
 
-HOOKS=(prime-easymem.sh prime-on-compact.sh prime-slots.sh
+HOOKS=(_common.sh prime-easymem.sh prime-on-compact.sh prime-slots.sh
        capture-decisions.sh nudge-setup.sh capture-tool-context.sh
        capture_tool_context.py smart_recall.py)
 for h in "${HOOKS[@]}"; do

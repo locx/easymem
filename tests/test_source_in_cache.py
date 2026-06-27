@@ -20,5 +20,5 @@ def test_source_retained_in_cache_and_mapped(tmp_path):
     # session diversification can read it without a full-file scan.
     assert ents["e"].get("_source") == "episode:abc"
 
-    src_map = search._load_source_map(memory_dir, ["e", "missing"])
+    src_map = search._load_source_map(["e", "missing"], ents)
     assert src_map == {"e": "episode:abc"}

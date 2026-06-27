@@ -98,6 +98,23 @@ def test_remove_observations_preserves_others_full_obs(tmp_path):
     assert len(set(obs)) == 25
 
 
+def test_rewrite_drop_counter_warns_on_unserializable(tmp_path, capsys):
+    from semantic_server.graph import rewrite_graph
+
+    mem = _mem(tmp_path)
+    # why: shared encoder returns None on a bad row; the rewrite path must
+    # still count + warn it, not silently swallow the drop.
+    rewrite_graph(str(mem), {}, [], others=[
+        {"type": "bad", "v": {1, 2}},
+        {"type": "ok", "v": 1},
+    ])
+    err = capsys.readouterr().err
+    assert "rewrite_graph dropped 1 invalid lines" in err
+    _, _, others = partition_graph(str(mem / "graph.jsonl"))
+    assert any(o.get("type") == "ok" for o in others)
+    assert all(o.get("type") != "bad" for o in others)
+
+
 def test_locked_rewrite_does_not_lose_concurrent_append(tmp_path):
     from semantic_server.graph import rewrite_graph_locked
 

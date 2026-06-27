@@ -173,3 +173,20 @@ def test_rerank_pool_prefers_rare_term_match(tmp_path):
     assert top_with == "BlipParser", (
         f"rerank should surface BlipParser; got {top_with}"
     )
+
+
+def test_rerank_tok_cache_is_bounded():
+    from collections import OrderedDict
+
+    from semantic_server import search
+    from semantic_server.config import MAX_RERANK_TOK_CACHE
+
+    n = MAX_RERANK_TOK_CACHE + 50
+    fused = [{"entity": f"E{i}", "score": 0.0} for i in range(n)]
+    ents = {f"E{i}": {"observations": [f"token{i} alpha"]} for i in range(n)}
+    search._corpus_tok_cache["key"] = None
+    search._corpus_tok_cache["data"] = OrderedDict()
+    out = search._idf_rerank("alpha", fused, 5, {"alpha": 1.0}, ents, {})
+    assert len(out) == 5
+    # all n distinct entries insert then evict down to exactly the cap
+    assert len(search._corpus_tok_cache["data"]) == MAX_RERANK_TOK_CACHE
