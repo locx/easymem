@@ -1,13 +1,12 @@
 # EasyMem Autonomous Workflow
 
 A staged pipeline that audits and **cleans up** EasyMem behind **two human gates — plan approval and
-final-diff approval**. Everything between the gates runs autonomously; a diff reaches the human only
-after it passes implementation, the verify gate, the smoke, a self-audit, an adversarial review ⇄
-correction loop, and a fresh-eyes integration review.
+final-diff approval**. Everything between the gates runs autonomously through the execution → review
+pipeline below.
 
 **Scope — cleanup and hardening, not feature work.** Dead code, duplication, excess complexity, and
 tech-debt are the deliverable: removed, consolidated, and simplified **strictly behavior-preserving**,
-never traded for new behavior. Clean up as much as the gates and invariants allow.
+never traded for new behavior.
 
 **Repo:** a local-first knowledge-graph memory plugin for Claude Code — Python 3.10+
 (`semantic_server/`, `hooks/`, `easymem-cli.py`, `maintenance.py`) plus shell (install/setup/hooks),
@@ -31,16 +30,13 @@ durability invariant, or a circuit breaker trips (both defined in *Guardrails*).
 ## Preconditions
 
 - Run from repo root, on `main`, with a **clean tree**. Execute phases **strictly in order**.
-- **Provision tooling or fail fast.** `./install.sh --dev` creates the project-local `.venv`
-  (`ruff` + `pytest` + `pytest-xdist`); add `shellcheck`. **Run every gate from `.venv` (Python 3.10)** — a missing gate
-  tool is a hard stop, never a silent skip. Run `easymem doctor` to validate Python, model cache, store.
-- **Baseline (orchestrator records once, in the worktree, before batch 1).** The worktree is pinned at
-  `BASE` (= `main`'s HEAD at gate time), so its baseline **is** the `main`-equivalent — there is no
-  separate "run on main" step. `python3 -m pytest` from `.venv` must be green; record its pass/skip
-  counts and tag them with `BASE` (the baseline-tag SHA must equal `BASE`). **The recorded counts are
-  authoritative, never a hardcoded literal** (they drift as batches add tests). Vector tests *skip*
-  (never fail) when the `model2vec` cache (`~/.cache/huggingface/`) is absent. A non-green baseline is a
-  STOP; thereafter a pass-count below baseline or a skip-count above it is a regression.
+- **Check the `.venv` exists** — it carries every gate tool (`ruff`, `pytest`, `pytest-xdist`,
+  `shellcheck`). If `.venv/` is absent, STOP and have the human run `./install.sh --dev`; the workflow
+  never provisions it (no system or `brew` install — the `.venv` is the only source). Run every gate from
+  `.venv` (Python 3.10) — a missing gate tool is a hard stop, never a silent skip.
+- **Baseline** — recorded at the start of Phase 4 in the worktree (pinned at `BASE`, so it equals `main`
+  — no separate "run on `main`"); see Phase 1's baseline note for the procedure. Must be green or the run
+  STOPs; its pass/skip counts are the regression floor for every later batch.
 - `<DATE>` = today (ISO `YYYY-MM-DD`). Each run owns `docs/audit/audit-<DATE>/`; a same-day re-run takes
   the next suffix (`-1`, `-2`, …) and never overwrites a prior run.
 
@@ -123,56 +119,43 @@ journal the heartbeat tails stays current.
 Paste these alongside the `<HARD-RULES v1>` briefing from `~/.claude/CLAUDE.md` §6 — `briefing-gate.sh`
 blocks any dispatch missing it. Per-phase prompts assume these and don't restate them.
 
-1. **Zero egress.** Any outbound socket — telemetry, HTTP, a cloud SDK, a network-capable dep, or
-   model-download in a runtime path — is a regression (see Invariant 2).
+1. **Zero egress.** Any outbound non-loopback socket from runtime code is a regression (Invariant 2).
 2. **Never weaken the scrubber.** `hooks/capture_tool_context.py` and `semantic_server/text.py` redact
-   secrets (`AKIA…`, `ghp_…`, `sk-…`, `Bearer …`, `PASSWORD=`, `--token`, URL userinfo, `PRIVATE KEY`)
-   **before** anything reaches `graph.jsonl`. Loosening a pattern, reordering capture-before-scrub, or
-   bypassing it is a privacy regression. Any **identity-field** scrub (entity name, relation endpoint,
-   decision title) must be **idempotent and collision-resistant**. `test_secret_scrub.py` is the floor.
-3. **`graph.jsonl` is the single source of truth.** Append-only JSONL; derived artifacts
-   (`tfidf_index.json`, `vec_index.npz`, `recall_counts.json`, caches) rebuild from it and are disposable.
-   Records carry a stable shape (`name`, `entityType`, `observations[]`, `_created`, `_updated`,
-   `_branch`, `_source`, `_neighbors`); the 13-tool contract lives in `tools_schema.json`. Never drop or
-   rename a field or tool; never rewrite the store outside the lock.
-4. **Never weaken a durability control:** `GraphLock` (fcntl, 5s timeout, backoff); merge-pending
-   **O_EXCL rotation + fsync** with `.processing` crash recovery; **mtime guards** on incremental reads;
-   **recall-lock + fsync**; bounded loops (`traverse` ≤10k, `workflows` ≤200k combos, recall LRU ≤10k,
-   cache byte-budget). Removing, loosening, or unbounding any of these is a regression even if tests pass.
-5. **Respect the retrieval contract.** TF-IDF is always available; `model2vec` int8 vectors are optional
-   and fuse via RRF (floor `0.05`). The system **degrades silently to TF-IDF** when the model is absent —
-   vectors are never a hard dependency.
-6. **Tag every `NEEDS-HUMAN`.** `NEEDS-HUMAN-BLOCK` — do **not** implement; surface at the plan gate
-   (adds egress / weakens the scrubber or a lock / changes the schema or tool contract / adds a
-   network-capable dep). `NEEDS-HUMAN-VERIFY` — implement with care, then require sign-off **before merge**
-   with a before/after equivalence table. Bare `NEEDS-HUMAN` defaults to BLOCK. *Strengthening* a control
-   is VERIFY at most, never BLOCK.
-7. **Languages.** Python 3.10+ with type hints for the engine; POSIX sh/bash for hooks and install
-   (keep `set -euo pipefail`, stay `shellcheck`-clean).
-8. **Verification is real.** No "passing" or "fixed" without this-run output from `python3 -m pytest`
-   **and** `ruff check` (`select=["E9","F"]`, line 100, excludes `bench/docs/.easymem`), via a
-   log-absorbing subagent that returns pass/fail + failing tests only. Run pytest under `-n auto`
-   (`pytest-xdist`) — tests build their own `tmp_path` stores, so they parallelize safely. **Two-tier
-   gate:** inside a fix→reverify loop you may run only the impacted tests to converge faster, but a batch,
-   self-audit, or review round is **green only on a full-suite `-n auto` run** — the commit gate is never
-   a subset. Store / retrieval / capture / hook changes also require the Phase 4 smoke.
+   secrets **before** anything reaches `graph.jsonl`; loosening a pattern, reordering capture-before-scrub,
+   or bypassing it is a privacy regression. Identity-field scrubs (entity / relation / decision names) stay
+   idempotent and collision-resistant. `test_secret_scrub.py` is the floor.
+3. **`graph.jsonl` is the single source of truth.** Append-only JSONL, written only under the lock;
+   derived indexes and caches rebuild from it and are disposable. Never drop or rename a record field or a
+   tool — the 13-tool contract lives in `tools_schema.json`.
+4. **Never weaken a durability control:** `GraphLock`, merge-pending O_EXCL rotation + fsync with
+   `.processing` crash recovery, mtime guards on incremental reads, recall-lock + fsync, and the bounded
+   loops (`traverse`, `workflows`, recall LRU, cache byte-budget). Loosening or unbounding any is a
+   regression even if tests pass.
+5. **Respect the retrieval contract.** TF-IDF is always available; `model2vec` vectors are optional and
+   fuse via RRF, degrading silently to TF-IDF when the model is absent — never a hard dependency.
+6. **Tag every `NEEDS-HUMAN`.** `-BLOCK` (egress / scrubber / lock / schema or tool contract / network
+   dep) — do **not** implement; surface at the plan gate. `-VERIFY` — implement with care, sign-off before
+   merge with a before/after table. Bare `NEEDS-HUMAN` = BLOCK; *strengthening* a control is VERIFY at most.
+7. **Languages.** Python 3.10+ typed for the engine; POSIX sh/bash (`set -euo pipefail`, shellcheck-clean)
+   for hooks and install.
+8. **Verification is real.** No "passing"/"fixed" without this-run `python3 -m pytest -n auto` **and**
+   `ruff check` (`select=["E9","F"]`, line 100, excludes `bench/docs/.easymem`), via a log-absorbing
+   subagent. **Two-tier gate:** impacted tests only inside a fix→reverify loop, but a batch, self-audit,
+   or review round is green only on a full-suite run. Store / retrieval / capture / hook changes also
+   require the Phase 4 smoke.
 
-**Cleanup-run scope (single source of truth for removals).** This run relaxes the usual
-"flag-don't-remove" default in favor of **behavior-preserving** cleanup — removing dead code,
-consolidating duplication, and simplifying complexity are the goal, not side effects. Invariants 1–5 and
-Guardrails 1–6 remain absolute. Every removal requires the **full suite green and grep-proof of zero
-callers**. Removing a public/exported symbol, a hook/CLI entry point, the deprecated MCP surface, or
-anything reachable by dynamic dispatch you can't grep is **NEEDS-HUMAN**, not autonomous. Deleting a whole
-file emits `rm` for the human (§1.2). The deprecated `python3 -m semantic_server` MCP entry point is
-**retained for back-compat — do not propose its removal**; treat it as live, not dead code.
+**Cleanup-run scope.** This run trades the usual "flag-don't-remove" default for **behavior-preserving**
+cleanup — removing dead code, consolidating duplication, simplifying complexity. Invariants 1–5 and
+Guardrails 1–6 stay absolute. Every removal needs the full suite green and grep-proof of zero callers;
+removing a public/exported symbol, a hook/CLI entry point, the MCP surface, or anything reachable by
+ungreppable dynamic dispatch is **NEEDS-HUMAN**, and deleting a whole file emits `rm` for the human
+(§1.2). The deprecated `python3 -m semantic_server` entry point is **retained — never propose its removal**.
 
 **Circuit breaker (per batch and per review round).** An *attempt* is one fix→reverify cycle; the counter
 resets on a fully-green round. **Non-converging** = the open-finding (or failing-test) count didn't
-strictly decrease, or the same `file:line + finding` recurs — surfacing *new* findings and fixing them is
-progress, not a strike. A round that surfaces **zero new** findings is convergence — it advances the
-two-clean-pass terminator (Phases 6/8), never counts as a strike. After **3 non-converging attempts**,
-stop and surface — never self-discard a checkpoint (`git reset --hard` is §1.2-destructive — emit it for
-the human). Bounds Phases 4, 6, 8.
+strictly decrease, or the same `file:line + finding` recurs (surfacing and fixing *new* findings is
+progress; a zero-new round is convergence, not a strike). After **3 non-converging attempts**, stop and
+surface — never self-discard a checkpoint (`git reset --hard` is §1.2; emit it). Bounds Phases 4, 6, 8.
 
 ---
 
@@ -202,14 +185,15 @@ OUTPUT → docs/audit/audit-<DATE>/analysis_report.md: 1 architecture · 2 modul
 ```
 
 **Baseline — the orchestrator runs this directly, once, in the worktree before batch 1 (not a subagent):**
-`python3 -m pytest` from `.venv` (record pass/skip counts; any red ⇒ STOP) plus 2–3 timings of the
+`python3 -m pytest` from `.venv` (record pass/skip counts — authoritative, never a hardcoded literal,
+since they drift as batches add tests; any red ⇒ STOP; vector tests *skip* not fail when the `model2vec`
+cache `~/.cache/huggingface/` is absent) plus 2–3 timings of the
 build-store → rebuild-index → search → recall path. Use an **in-process harness over a scaled store**
 (thousands of entities) — CLI-invocation timing is startup-dominated and won't catch a regression.
-**Size the index cache from real on-disk bytes (`os.path.getsize`), never an in-memory `estimate_size`:**
-a synthetic estimate once inflated the cache-thrash crossover ~5× and reported a phantom 345 ms/query that
-vanished under true sizing. State the sizing method with the numbers, and cap bench scale at the real
-on-disk crossover (~37k entities) rather than chasing 100k (a full build there is impractical in-bench).
-Tag the record with `git rev-parse HEAD`.
+**Size the index cache from real on-disk bytes (`os.path.getsize`), never an in-memory `estimate_size`**
+(a synthetic estimate skews the cache-thrash crossover badly). State the sizing method with the numbers,
+and cap bench scale at the real on-disk crossover (~37k entities), not 100k (impractical to build
+in-bench). Tag the record with `git rev-parse HEAD`.
 
 ## Phase 2 — Production Audit (+ 2b: 10× Performance pass)
 
@@ -485,13 +469,11 @@ reaches `main` without approval.
 | Trace a subsystem | `feature-dev:code-explorer` / `python-codebase-explorer` |
 | Parallelize | P1 Explores · P2 lenses A–C · P6 panel + verify-per-finding (barrier-join, dedupe) |
 | Independent review | `python-code-reviewer` (+ `code-simplifier:code-simplifier`, `python-architecture-validator`) |
-| Verify gate | `.venv` `python3 -m pytest -n auto` (recorded baseline; two-tier gate) **and** `ruff check` (E9+F); `shellcheck` for shell |
-| Smoke gate (store·AI·hook) | `scripts/smoke.sh`: throwaway `.easymem` → ZERO egress + scrubber-held (both hard) + no lost/corrupt write + retrieval live + no fusion regression |
-| Integration review | fresh-eyes over `$BASE..HEAD`; ends on two consecutive rounds with **zero correctness/regression** findings (no seen-set; reuse/efficiency findings don't block). Differs from P6's "nothing-new" rule |
-| Removals (cleanup run) | grep-proof zero callers + suite green; public-API/entry-point/MCP/whole-file → NEEDS-HUMAN / emit `rm` |
-| Progress | ~30s heartbeat → `progress.md` (Orchestration); per-batch: flip tasklist `[ ]`→`[x]`, echo ✅/⬜ + M/T %, batch N of B, est-vs-actual |
+| Verify gate | Guardrail 8 — `.venv pytest -n auto` + `ruff check`; `shellcheck` shell |
+| Smoke gate (store·AI·hook) | Phase 4.3 — `scripts/smoke.sh`: egress + scrub + durability + retrieval (+ fusion) |
+| Integration review | Phase 8 — fresh-eyes over `$BASE..HEAD`, two clean rounds (differs from P6) |
+| Removals (cleanup run) | Cleanup-run scope — grep-proof zero callers + suite green; public/entry/MCP/whole-file → NEEDS-HUMAN |
+| Progress | Orchestration — ~30s heartbeat → `progress.md`; per-batch tasklist flip + ✅/⬜ echo |
 
-**The one rule above all:** a green build is never worth breaking local-first or durability. Every byte
-stays under `.easymem/`, no secret reaches `graph.jsonl`, no socket leaves the machine, the lock and
-merge-rotation hold, and `graph.jsonl` round-trips without loss or corruption — fix the code or the input,
-never the assertion.
+**The one rule above all:** a green build is never worth breaking an Invariant — fix the code or the
+input, never the assertion.

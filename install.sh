@@ -215,7 +215,7 @@ if [ $DEV_SETUP -eq 1 ]; then
         echo "  ERROR: dev install failed; re-run install.sh --dev to retry" >&2
         exit 1
     }
-    echo "  [ok] editable install + dev extras (pytest, ruff, shellcheck)"
+    echo "  [ok] editable install + dev extras (pytest, pytest-xdist, ruff, shellcheck)"
     echo "  Activate: source ${DEV_VENV}/bin/activate"
     echo ""
 fi
