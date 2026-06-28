@@ -99,14 +99,17 @@ the same file concurrently.
 - **Batches run sequentially** — they share files and the smoke needs a stable before-state; gate each
   commit per Guardrail 8. Sole exception: split provably file-disjoint batches across separate worktrees
   only when a measured wall-clock win justifies the extra merge + re-test.
-- **Progress heartbeat (~30s).** Some UIs (e.g. VS Code) can't open the live `/workflows` viewer, so a
-  fixed-cadence heartbeat is the portable progress channel. While any phase, batch, or fan-out agent is in
-  flight, append a one-line snapshot to `progress.md` every ~30s: `<ISO-time> · phase <P> · batch <N>/<B> ·
-  agents <active>a/<done>d · docs <written> · findings <count> · last <event>`. Drive it from a lightweight
-  poller (true 30s ticks; a self-paced wake-up floors at ~60s) that writes through `Write`/`log()`, never a
-  shell `>>`/`tee` redirect. **The orchestrator emits the snapshot itself** when the run isn't encoded as a
-  `Workflow` — never make the heartbeat contingent on a `Workflow` journal, or a manual run emits nothing.
-  Status only: it never relaxes a gate, a STOP, or an invariant, nor authorizes a mutation.
+- **Tasklist in chat (mandatory).** Call `TodoWrite` at every phase and batch boundary so the live tasklist
+  renders in the chat, plus the per-batch `✅/⬜` echo (Phase 4.5). No phase or batch passes without a visible
+  in-chat tasklist update — this is the primary progress signal.
+- **Status heartbeat (~60s to chat).** Whenever a phase, batch, or fan-out is in flight and the step will
+  block longer than ~60s, drive a self-paced `ScheduleWakeup` that posts a one-line status to the **chat** on
+  a ~60s cadence (the chat floor — a sub-minute tick isn't emittable mid-tool-call, so the ~30s ambition lands
+  at ~60s in chat): `phase <P> · batch <N>/<B> · agents <active>a/<done>d · docs <written> · findings <count>
+  · last <event>`. Also append the same snapshot to `progress.md` as the finer tail-able file channel, via a
+  `Write`/`log()` poller — never a shell `>>`/`tee` redirect. **The orchestrator emits it itself** when the run
+  isn't encoded as a `Workflow` — never make the heartbeat contingent on a `Workflow` journal, or a manual run
+  emits nothing. Status only: it never relaxes a gate, a STOP, or an invariant, nor authorizes a mutation.
 
 For long runs, encode this as a `Workflow` script (`pipeline` / `parallel` / loop-until-dry / verify)
 for a token budget and journaled resume; emit a `log()` line at every fan-out and barrier-join so the
@@ -473,7 +476,7 @@ reaches `main` without approval.
 | Smoke gate (store·AI·hook) | Phase 4.3 — `scripts/smoke.sh`: egress + scrub + durability + retrieval (+ fusion) |
 | Integration review | Phase 8 — fresh-eyes over `$BASE..HEAD`, two clean rounds (differs from P6) |
 | Removals (cleanup run) | Cleanup-run scope — grep-proof zero callers + suite green; public/entry/MCP/whole-file → NEEDS-HUMAN |
-| Progress | Orchestration — ~30s heartbeat → `progress.md`; per-batch tasklist flip + ✅/⬜ echo |
+| Progress | Orchestration — in-chat `TodoWrite` tasklist per phase/batch + ✅/⬜ echo; ~60s `ScheduleWakeup` chat status while a step blocks; `progress.md` file snapshot |
 
 **The one rule above all:** a green build is never worth breaking an Invariant — fix the code or the
 input, never the assertion.
